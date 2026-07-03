@@ -256,3 +256,16 @@ first scan the mapping is local-only.
 If OpenAI picks a generic name you don't like (e.g. `Beans` when you wanted
 `Black Beans`), open **Lookup Tables → UPC → Generic Cache** and edit it
 in place. Future scans use your edit.
+
+## Files for scheduled backups
+
+- openpantry.db SQLite database located in openpantry/
+- picklist.db SQLite database for the menu counter and delivery modules
+  located in openpantry/menucounter/
+- openpantry_secret/encryption_key.php should be placed at the same level as
+  the public_html directory to secure it from the website and only needs to be
+  backed up one time after it is created by the app. For example, create or edit
+  an openpantry/.htaccess file to contain SetEnv OPENPANTRY_KEY_PATH 
+  /home/footprin/domains/DOMAIN_DIRECTORY_NAME/openpantry_secret/encryption_key.php
+  and place the created encryption_key.php in that directory.
+  SetEnv OPENPANTRY_KEY_PATH /home/footprin/domains/DOMAIN_DIRECTORY_NAME/openpantry_secret/encryption_key.php
