@@ -113,6 +113,7 @@ item's projected days-of-stock drops below its threshold. Tick an alert's
 triggered items to the administrator, throttled to at most once per ~20 hours.
 Email goes out via authenticated SMTP when configured, otherwise PHP `mail()`.
 The SMTP client in `mailer.php` is self-contained — no libraries.
+The "Email Order" features uses Gmail or you can alternatively "Print Order".
 
 ---
 
@@ -230,14 +231,18 @@ Two SQLite files are created automatically: `openpantry.db` at the root and
 
 ---
 
-## Hardware notes — laser scanners
+## Hardware notes — laser scanners and scales
 
 Most USB / Bluetooth handheld scanners (Honeywell, Symbol/Zebra, Inateck,
 NetumScan, etc.) ship as HID keyboard-wedge devices: they type the barcode
 digits, then send a CR/Enter terminator. The scan page assumes that default —
 no driver or pairing beyond the OS keyboard pairing. If your scanner doesn't
 send Enter, reconfigure it via its programming sheet to add a CR (or CR+LF)
-suffix.
+suffix. The recommended hardware setup consists of a Chromebook with a USB
+laser scanner and VEVOR Industrial Scale that includes a RS-232 to USB HID
+interface to automatically enter produce weight in pounds (e.g. 1.120lb).
+Alternatively, all PLU/UPC codes and weights can be entered manually and there
+is a camera option available instead of requiring a laser scanner.
 
 ## Open Food Facts notes
 
