@@ -1,0 +1,14 @@
+# Runtime SQLite databases — contain live orders and (encrypted) client PII
+*.db
+*.db-wal
+*.db-shm
+
+# Field-encryption key — NEVER commit. Leaking or losing it is catastrophic.
+encryption_key.php
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store
