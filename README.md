@@ -2,9 +2,9 @@
 
 A self-contained **PHP + SQLite** application for assisting a food pantry:
 check items out the door, keep a live inventory, and forecast what to
-reorder — no database server, no build step, no external dependencies to
-install. Drop the folder on any PHP 8 host and it initializes itself on the
-first request.
+reorder with granular reporting for critical insights — no database server,
+no build step, no external dependencies to install. Drop the folder on any
+PHP 8 host and it initializes itself on the first request.
 
 Food banks and pantries serve approximately 25% to 30% of food-insecure
 households in the United States. This application aids in the underserved
