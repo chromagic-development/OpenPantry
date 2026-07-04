@@ -126,10 +126,11 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
 - **Network gate.** Pages can be restricted to a single allowed IP (your
   pantry's public WiFi address) and to configurable weekly **allowed hours**.
   Both live in `auth.php`; leave the IP blank to allow all.
-- **Field-level encryption.** Sensitive columns are encrypted at rest with
-  libsodium (`crypto.php`): `settings.openai_api_key`, `settings.allowed_ip`,
-  and delivery clients' `address` / `city` / `phone`. The 32-byte key lives in
-  `encryption_key.php`, generated on first use.
+- **Field-level encryption.** PII security and privacy is paramount.
+  Sensitive columns are encrypted at rest with libsodium (`crypto.php`): 
+  `settings.openai_api_key`, `settings.allowed_ip`, and delivery clients'
+  `address` / `city` / `phone`. The 32-byte key lives in `encryption_key.php`,
+  generated on first use.
 
   > ⚠️ **Back up `encryption_key.php` and keep it out of version control.**
   > Losing it makes all encrypted data permanently unrecoverable. It's
