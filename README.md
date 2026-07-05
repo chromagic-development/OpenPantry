@@ -32,10 +32,6 @@ deliveries, events, and order-ahead imports. Every outbound channel funnels
 into one inventory and one demand model, so the reorder report sees the
 whole picture.
 
-- **Author:** Bruce Alexander — Chromagic Development
-- **License:** [MIT](LICENSE)
-- **Stack:** PHP 8+, SQLite (`pdo_sqlite`), with a dash of Open Food Facts and OpenAI APIs
-
 ---
 
 ## What it does
