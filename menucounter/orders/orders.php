@@ -345,7 +345,6 @@ if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
     </div>
     <span class="refresh-dot" title="Auto-refreshing every 15s"></span>
     <button class="btn-refresh" onclick="loadOrders()">↺ Refresh</button>
-    <a href="../admin" class="btn-config">⚙ Manage Items</a>
   </div>
 </header>
 
