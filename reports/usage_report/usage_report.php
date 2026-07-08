@@ -11,7 +11,7 @@ $db = getDB();
 
 date_default_timezone_set('America/New_York');
 
-$defaultStart = date('Y-m-d', strtotime('-30 days'));
+$defaultStart = date('Y-m-d');
 $defaultEnd   = date('Y-m-d');
 $dateStart = $_GET['date_start'] ?? $defaultStart;
 $dateEnd   = $_GET['date_end']   ?? $defaultEnd;

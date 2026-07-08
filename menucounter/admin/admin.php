@@ -54,6 +54,17 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
     }
 }
 
+// AJAX password check for the confirm-change modal. admin_password is a
+// one-way hash, so the check must happen server-side — the client can't
+// compare plaintext input against the stored value.
+if (isset($_POST['action']) && $_POST['action'] === 'verify_password') {
+    header('Content-Type: application/json');
+    $ok = isAuthenticated($adminPassword)
+          && fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword);
+    echo json_encode(['success' => $ok]);
+    exit;
+}
+
 // Handle logout
 if (isset($_GET['logout'])) {
     clearAuthCookie();
@@ -224,6 +235,18 @@ if (!isAuthenticated($adminPassword)) {
 </header>
 
 <div class="container">
+  <div class="card" style="margin-bottom:20px;">
+    <div style="padding:16px 20px; display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap;">
+      <div style="flex:1 1 320px;">
+        <label for="clientNotes" style="display:block; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.4px; color:var(--brown); margin-bottom:6px;">Special Notes to Clients</label>
+        <input type="text" id="clientNotes"
+               placeholder="Optional note shown at the top of the order form — leave blank to show nothing"
+               style="width:100%; border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:.9rem; background:#fafaf5;">
+      </div>
+      <button class="btn btn-brown" onclick="saveClientNotes()">💾 Save Note</button>
+    </div>
+  </div>
+
   <h1>Configure Order Form Items</h1>
   <p class="subtitle">Add, remove, reorder, or toggle items that appear on the customer order form. Drag rows to reorder. Changes take effect immediately for new orders.</p>
 
@@ -294,9 +317,11 @@ let items = [];
 let dragSrc = null;
 
 // ── Password modal ──────────────────────────────────────────────────
-const ADMIN_PW = <?= json_encode($adminPassword) ?>;
+// The admin password is stored as a one-way hash, so entered passwords are
+// verified server-side (POST action=verify_password) rather than compared here.
 let pwModalCallback = null;
 let pwModalRevertCallback = null;
+let pwModalChecking = false;
 
 function requirePassword(title, desc, onConfirm, onCancel) {
   document.getElementById('pwModalTitle').textContent = title;
@@ -309,9 +334,23 @@ function requirePassword(title, desc, onConfirm, onCancel) {
   setTimeout(function() { document.getElementById('pwModalInput').focus(); }, 50);
 }
 
-function pwModalConfirm() {
+async function pwModalConfirm() {
+  if (pwModalChecking) return;
+  pwModalChecking = true;
   var entered = document.getElementById('pwModalInput').value;
-  if (entered !== ADMIN_PW) {
+  var ok = false;
+  try {
+    const res  = await fetch('admin.php', {
+      method: 'POST',
+      body: new URLSearchParams({ action: 'verify_password', password: entered })
+    });
+    const data = await res.json();
+    ok = !!data.success;
+  } catch (e) {
+    ok = false;
+  }
+  pwModalChecking = false;
+  if (!ok) {
     document.getElementById('pwModalError').textContent = '✗ Incorrect password.';
     document.getElementById('pwModalInput').value = '';
     document.getElementById('pwModalInput').focus();
@@ -338,7 +377,22 @@ async function loadItems() {
   const res  = await fetch('../api.php?action=get_config');
   const data = await res.json();
   items = data.items || [];
+  document.getElementById('clientNotes').value = data.client_notes || '';
   renderTable();
+}
+
+async function saveClientNotes() {
+  try {
+    const res  = await fetch('../api.php?action=save_notes', {
+      method: 'POST',
+      body: new URLSearchParams({ notes: document.getElementById('clientNotes').value })
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error);
+    showToast('✅ Client note saved!');
+  } catch(e) {
+    showToast('⚠ Save failed: ' + e.message);
+  }
 }
 
 function renderTable() {
@@ -373,31 +427,32 @@ function renderTable() {
                  placeholder="Item name"></td>
       <td style="text-align:center;">
         <input type="checkbox" ${item.has_detail==1?'checked':''}
-               onchange="items[${i}].has_detail=this.checked?1:0; renderTable()">
+               onchange="confirmCheckboxChange(this, ${i}, 'has_detail')">
       </td>
       <td>
-        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.detail_label||'Size')}" oninput="items[${i}].detail_label=this.value" placeholder="Label">` : '<span style="color:#ccc">—</span>'}
+        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.detail_label||'Size')}" onfocus="this.dataset.prev=this.value" onchange="confirmFieldChange(this, ${i}, 'detail_label')" placeholder="Label">` : '<span style="color:#ccc">—</span>'}
       </td>
       <td>
-        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.size_options||'')}" oninput="items[${i}].size_options=this.value" placeholder="e.g. Small,Medium,Large" title="Comma-separated list of size options">` : '<span style="color:#ccc">—</span>'}
+        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.size_options||'')}" onfocus="this.dataset.prev=this.value" onchange="confirmFieldChange(this, ${i}, 'size_options')" placeholder="e.g. Small,Medium,Large" title="Comma-separated list of size options">` : '<span style="color:#ccc">—</span>'}
       </td>
       <td>
         <input type="number" value="${parseFloat(item.family_factor||1).toFixed(2)}"
                min="0.01" step="0.01"
                title="Multiply family size (max 5) by this factor then round up to get item quantity"
-               oninput="items[${i}].family_factor=parseFloat(this.value)||1"
+               onfocus="this.dataset.prev=this.value"
+               onchange="confirmFieldChange(this, ${i}, 'family_factor')"
                style="width:70px;text-align:center;">
       </td>
       <td style="text-align:center;">
         <input type="checkbox" title="Use only Adults count in calculation"
                ${item.use_adults==1?'checked':''}
-               onchange="items[${i}].use_adults=this.checked?1:0"
+               onchange="confirmCheckboxChange(this, ${i}, 'use_adults')"
                style="accent-color:#6B4C11;width:16px;height:16px;">
       </td>
       <td style="text-align:center;">
         <input type="checkbox" title="Use only Children count in calculation"
                ${item.use_children==1?'checked':''}
-               onchange="items[${i}].use_children=this.checked?1:0"
+               onchange="confirmCheckboxChange(this, ${i}, 'use_children')"
                style="accent-color:#4A90D9;width:16px;height:16px;">
       </td>
       <td>
@@ -424,14 +479,35 @@ function filterItems(term) {
 }
 
 function addRow() {
-  items.push({ category:'DAIRY', item_name:'', has_detail:0, detail_label:'', size_options:'', family_factor:0.10, active:1, unavailable:0, use_adults:0, use_children:0, sort_order:items.length, isNew:true });
-  renderTable();
-  // Focus the new row name input
-  setTimeout(() => {
-    const rows = document.querySelectorAll('#itemsTbody tr');
-    const last = rows[rows.length-1];
-    if (last) { const inp = last.querySelector('input[type="text"]'); if (inp) inp.focus(); }
-  }, 50);
+  requirePassword(
+    'Confirm Change',
+    'Enter the admin password to add a new item.',
+    function() {
+      items.push({ category:'DAIRY', item_name:'', has_detail:0, detail_label:'', size_options:'', family_factor:0.10, active:1, unavailable:0, use_adults:0, use_children:0, sort_order:items.length, isNew:true });
+      renderTable();
+      // Focus the new row name input
+      setTimeout(() => {
+        const rows = document.querySelectorAll('#itemsTbody tr');
+        const last = rows[rows.length-1];
+        if (last) { const inp = last.querySelector('input[type="text"]'); if (inp) inp.focus(); }
+      }, 50);
+    }
+  );
+}
+
+var FIELD_LABELS = {
+  category:      'Category',
+  item_name:     'Item Name',
+  detail_label:  'Subtype Label',
+  size_options:  'Subtype Selections',
+  family_factor: 'Family Factor',
+  has_detail:    'Subtype?',
+  use_adults:    'Adults',
+  use_children:  'Children'
+};
+
+function applyFieldValue(i, field, newVal) {
+  items[i][field] = field === 'family_factor' ? (parseFloat(newVal) || 1) : newVal;
 }
 
 function confirmFieldChange(el, i, field) {
@@ -441,24 +517,41 @@ function confirmFieldChange(el, i, field) {
 
   // New rows (not yet saved) don't require password approval
   if (items[i] && items[i].isNew) {
-    if (field === 'category')  items[i].category  = newVal;
-    if (field === 'item_name') items[i].item_name = newVal;
+    applyFieldValue(i, field, newVal);
     el.dataset.prev = newVal;
     return;
   }
 
-  var label = field === 'category' ? 'Category' : 'Item Name';
   requirePassword(
     'Confirm Change',
-    'Enter the admin password to change the ' + label + ' field.',
+    'Enter the admin password to change the ' + FIELD_LABELS[field] + ' field.',
     function() {
-      if (field === 'category')  items[i].category  = newVal;
-      if (field === 'item_name') items[i].item_name = newVal;
+      applyFieldValue(i, field, newVal);
       el.dataset.prev = newVal;
     },
     function() {
       el.value = prevVal;
     }
+  );
+}
+
+function confirmCheckboxChange(el, i, field) {
+  var newVal = el.checked ? 1 : 0;
+
+  function apply() {
+    items[i][field] = newVal;
+    // Subtype? shows/hides the label and selections inputs, so re-render
+    if (field === 'has_detail') renderTable();
+  }
+
+  // New rows (not yet saved) don't require password approval
+  if (items[i] && items[i].isNew) { apply(); return; }
+
+  requirePassword(
+    'Confirm Change',
+    'Enter the admin password to change the ' + FIELD_LABELS[field] + ' field.',
+    apply,
+    function() { el.checked = (newVal !== 1); }
   );
 }
 

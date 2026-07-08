@@ -85,6 +85,13 @@ function getDB() {
         sort_order INTEGER DEFAULT 0
     )");
 
+    // Menucounter-local settings (key/value). Currently just `client_notes`,
+    // the optional "Special Notes to Clients" line shown on the order form.
+    $db->exec("CREATE TABLE IF NOT EXISTS menu_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT DEFAULT ''
+    )");
+
     // (admin_password / allowed_ip moved to openpantry.db — see foodscanSetting().)
 
     // Seed default items if table is empty
@@ -116,4 +123,21 @@ function getDB() {
     }
 
     return $db;
+}
+
+// Read a menucounter-local setting from picklist.db (menu_settings table).
+function menuSetting(PDO $db, string $key, string $default = ''): string {
+    try {
+        $s = $db->prepare('SELECT value FROM menu_settings WHERE key = ?');
+        $s->execute([$key]);
+        $v = $s->fetchColumn();
+        return $v === false ? $default : (string)$v;
+    } catch (\PDOException $e) {
+        return $default;
+    }
+}
+
+function setMenuSetting(PDO $db, string $key, string $value): void {
+    $db->prepare('INSERT OR REPLACE INTO menu_settings (key, value) VALUES (?, ?)')
+       ->execute([$key, $value]);
 }
