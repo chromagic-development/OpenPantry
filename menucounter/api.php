@@ -119,7 +119,17 @@ try {
             $stmt = $db->query(
                 "SELECT * FROM config_items ORDER BY category, sort_order, id"
             );
-            echo json_encode(['success' => true, 'items' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+            echo json_encode([
+                'success'      => true,
+                'items'        => $stmt->fetchAll(PDO::FETCH_ASSOC),
+                'client_notes' => menuSetting($db, 'client_notes'),
+            ]);
+            break;
+
+        // ── Admin: save "Special Notes to Clients" (order-form banner) ───
+        case 'save_notes':
+            setMenuSetting($db, 'client_notes', trim($_POST['notes'] ?? ''));
+            echo json_encode(['success' => true]);
             break;
 
         // ── Admin: save config items ─────────────────────────────────────

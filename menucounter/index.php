@@ -52,6 +52,9 @@ $success  = isset($_GET['success']);
 $orderId  = (int)($_GET['order_id'] ?? 0);
 $errName  = isset($_GET['error']) && $_GET['error'] === 'name';
 
+// Optional "Special Notes to Clients" line (Admin → Manage Items). Blank = hidden.
+$clientNotes = trim(menuSetting($db, 'client_notes'));
+
 $weekStart = date('M j', strtotime('monday this week'));
 $weekEnd   = date('j',   strtotime('friday this week'));
 $weekLabel = $weekStart . ' - ' . $weekEnd;
@@ -115,6 +118,15 @@ $weekLabel = $weekStart . ' - ' . $weekEnd;
   /* ── Main Layout ────────────────────────── */
   .container { max-width: 900px; margin: 24px auto 40px; padding: 0 16px; }
   .card { background: #fff; border: 1px solid var(--border); border-radius: 10px; overflow: visible; box-shadow: 0 2px 10px rgba(0,0,0,.07); }
+
+  /* ── Special Notes to Clients (set in Admin) ── */
+  .client-notes {
+    padding: 12px 20px; text-align: center;
+    font-family: Georgia, 'Palatino Linotype', 'Book Antiqua', serif;
+    font-style: italic; font-size: 1.02rem; font-weight: 600;
+    letter-spacing: .2px; color: var(--blue);
+    background: #F7FAFF; border-bottom: 1px solid var(--border);
+  }
 
   .order-header { display: flex; flex-direction: column; border-bottom: 2px solid var(--border); }
   .name-cell { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; justify-content: center; gap: 6px; }
@@ -269,6 +281,12 @@ $weekLabel = $weekStart . ' - ' . $weekEnd;
   <div style="padding: 18px 20px; background: var(--cat-bg); border-bottom: 2px solid var(--border);">
     <button type="submit" class="btn-submit">📋 DONE</button>
   </div>
+
+  <?php if ($clientNotes !== ''): ?>
+  <?php // Rendered verbatim — the note is admin-authored and may contain HTML
+        // (formatting tags, emoji entities). Do not echo untrusted input here. ?>
+  <div class="client-notes"><?= $clientNotes ?></div>
+  <?php endif; ?>
 
   <div class="order-header">
     <div class="name-cell">
