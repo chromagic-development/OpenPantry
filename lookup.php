@@ -219,6 +219,36 @@ function cacheGenericExamples(int $limit = 40): string {
 }
 
 function openAIRequest(string $url, array $payload, string $apiKey): array {
+    $raw = openAIRawRequest($url, $payload, $apiKey);
+    if ($raw['body'] === null) return ['name' => null, 'error' => $raw['error']];
+    return parseOpenAIResponse($raw['code'], $raw['body']);
+}
+
+// General chat completion returning the reply text untouched (no name-style
+// trimming, which would eat trailing periods from prose). Used for the
+// recipe / preparation-help features on the scan page.
+function openAIChatText(array $messages, string $apiKey, string $model,
+                        int $maxTokens = 700, float $temperature = 0.4): array {
+    $payload = [
+        'model'       => $model,
+        'temperature' => $temperature,
+        'max_tokens'  => $maxTokens,
+        'messages'    => $messages,
+    ];
+    $raw = openAIRawRequest('https://api.openai.com/v1/chat/completions', $payload, $apiKey);
+    if ($raw['body'] === null) return ['text' => null, 'error' => $raw['error']];
+    $data = json_decode($raw['body'], true);
+    if ($raw['code'] >= 400 || !is_array($data)) {
+        $msg = is_array($data) ? ($data['error']['message'] ?? null) : null;
+        return ['text' => null, 'error' => $msg ?? ('HTTP ' . $raw['code'] . ' from OpenAI')];
+    }
+    $txt = trim((string)($data['choices'][0]['message']['content'] ?? ''));
+    if ($txt === '') return ['text' => null, 'error' => 'OpenAI returned empty content'];
+    return ['text' => $txt, 'error' => null];
+}
+
+// Transport only: returns ['code' => int, 'body' => ?string, 'error' => ?string].
+function openAIRawRequest(string $url, array $payload, string $apiKey): array {
     $body = json_encode($payload);
     $headers = [
         'Content-Type: application/json',
@@ -243,9 +273,9 @@ function openAIRequest(string $url, array $payload, string $apiKey): array {
         curl_close($ch);
 
         if ($resp === false) {
-            return ['name' => null, 'error' => 'cURL transport error: ' . $err];
+            return ['code' => 0, 'body' => null, 'error' => 'cURL transport error: ' . $err];
         }
-        return parseOpenAIResponse($code, $resp);
+        return ['code' => $code, 'body' => $resp, 'error' => null];
     }
 
     // Fallback: file_get_contents.
@@ -261,7 +291,7 @@ function openAIRequest(string $url, array $payload, string $apiKey): array {
     $resp = @file_get_contents($url, false, $ctx);
     if ($resp === false) {
         $err = error_get_last()['message'] ?? 'unknown';
-        return ['name' => null, 'error' => 'file_get_contents failed: ' . $err
+        return ['code' => 0, 'body' => null, 'error' => 'file_get_contents failed: ' . $err
             . ' (consider enabling php_curl in php.ini)'];
     }
     $code = 200;
@@ -269,7 +299,7 @@ function openAIRequest(string $url, array $payload, string $apiKey): array {
         && preg_match('#HTTP/\S+\s+(\d+)#', $http_response_header[0], $m)) {
         $code = (int)$m[1];
     }
-    return parseOpenAIResponse($code, $resp);
+    return ['code' => $code, 'body' => $resp, 'error' => null];
 }
 
 function parseOpenAIResponse(int $httpCode, string $body): array {

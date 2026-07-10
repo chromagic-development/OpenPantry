@@ -3,6 +3,7 @@
 // POST { action: 'lookup', barcode }                          -> resolve only, do not insert.
 // POST { action: 'record', barcode, weight_lbs?, quantity? }  -> resolve + insert; returns the new scan_id.
 // POST { action: 'delete', scan_id }                          -> remove a scan, only if it belongs to the current open order.
+// POST { action: 'search', q }                                -> partial name match against the lookup tables.
 
 require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/auth.php';
@@ -11,6 +12,44 @@ require_once __DIR__ . '/lookup.php';
 
 $in = jsonIn();
 $action = $in['action'] ?? '';
+
+if ($action === 'search') {
+    // Type-ahead for the scan page: partial name match so an operator can add
+    // an item by typing its name instead of scanning. Matches generic names in
+    // both lookup tables (plus UPC brand names) and dedupes by generic name —
+    // when several codes share a name, the produce PLU wins over a cached UPC
+    // so the recorded barcode is the pantry's own code where one exists.
+    $q = trim((string)($in['q'] ?? ''));
+    if (strlen($q) < 2) jsonOut(['ok' => true, 'matches' => [], 'total' => 0]);
+    $like = '%' . strtr($q, ['\\' => '\\\\', '%' => '\\%', '_' => '\\_']) . '%';
+    $st = getDB()->prepare(
+        "SELECT code, generic_name, '' AS brand_name, 'produce' AS src
+           FROM produce_lookup
+          WHERE generic_name LIKE ? ESCAPE '\\'
+         UNION ALL
+         SELECT upc AS code, generic_name, COALESCE(brand_name, '') AS brand_name, 'upc' AS src
+           FROM upc_lookup
+          WHERE generic_name LIKE ? ESCAPE '\\' OR brand_name LIKE ? ESCAPE '\\'"
+    );
+    $st->execute([$like, $like, $like]);
+    $matches = [];
+    foreach ($st->fetchAll() as $row) {
+        $key = mb_strtolower($row['generic_name']);
+        if (isset($matches[$key])) continue;  // produce rows come first, so they win
+        $matches[$key] = [
+            'code'  => $row['code'],
+            'name'  => $row['generic_name'],
+            'brand' => $row['brand_name'],
+            'src'   => $row['src'],
+        ];
+    }
+    ksort($matches);
+    jsonOut([
+        'ok'      => true,
+        'matches' => array_slice(array_values($matches), 0, 8),
+        'total'   => count($matches),
+    ]);
+}
 
 if ($action === 'delete') {
     $scanId = (int)($in['scan_id'] ?? 0);
