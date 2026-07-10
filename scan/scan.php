@@ -10,6 +10,17 @@ $order = currentOpenOrder();
 // Tare (ounces) subtracted from each entered produce weight; converted to lb
 // for the client-side weight math.
 $tareLbs = (float)(setting('tare_oz', '0') ?? 0) / 16.0;
+// End/Cancel reload the page with these params so the confirmation survives
+// the refresh. Only honored when no order is open (a new scan supersedes it).
+$closedMsg = '';
+if (!$order) {
+  if (!empty($_GET['closed'])) {
+    $closedMsg = 'Order #' . (int)$_GET['closed'] . ' closed'
+               . (!empty($_GET['at']) ? ' at ' . htmlspecialchars($_GET['at']) : '');
+  } elseif (!empty($_GET['cancelled'])) {
+    $closedMsg = 'Order #' . (int)$_GET['cancelled'] . ' cancelled — scans discarded';
+  }
+}
 renderHead('Scan');
 // Menu/subnav intentionally omitted — the scan station is a focused kiosk flow.
 ?>
@@ -21,7 +32,8 @@ renderHead('Scan');
         <?= $order ? '#' . (int)$order['id'] : '— not started —' ?>
       </div>
       <div id="orderStartLabel" style="font-size:.8rem; color:#777;">
-        <?= $order ? 'Started ' . htmlspecialchars($order['started_at']) : 'Scan an item to begin a new order' ?>
+        <?= $order ? 'Started ' . htmlspecialchars($order['started_at'])
+                   : ($closedMsg ?: 'Scan an item to begin a new order') ?>
       </div>
     </div>
     <div style="display:flex; gap:8px;">
@@ -37,15 +49,19 @@ renderHead('Scan');
       <div>
         <strong>Scanner ready:</strong> point at a barcode and pull the trigger.
         The field below shows what the scanner is typing. Tap the field if the
-        cursor leaves it.
+        cursor leaves it. No barcode? Type the item's <em>name</em> instead —
+        matches from the lookup tables appear as you type.
       </div>
     </div>
-    <label for="barcodeInput">Barcode</label>
+    <label for="barcodeInput">Barcode or Item Name</label>
     <input type="text" id="barcodeInput" autocomplete="off" autocapitalize="off"
-           autocorrect="off" spellcheck="false" inputmode="numeric"
-           placeholder="Waiting for scan or keypad input…"
+           autocorrect="off" spellcheck="false"
+           placeholder="Scan, type a barcode, or type an item name…"
            style="font-size:1.4rem; font-family:monospace; letter-spacing:2px;"
            autofocus>
+
+    <!-- Type-ahead results when the operator types a name instead of a barcode -->
+    <div id="nameMatches" style="display:none;"></div>
 
     <div id="lastScanWrap" style="display:none; margin-top:12px;">
       <div style="font-size:.75rem; text-transform:uppercase; color:#777;">Last scan</div>
@@ -172,10 +188,31 @@ renderHead('Scan');
                   justify-content: flex-end; background: #fafaf5; border-top: 1px solid var(--border); }
     .wt-btn { font-size: 1.05rem; padding: 14px 26px; min-width: 130px; }
     .wt-btn-primary { min-width: 180px; }
+
+    /* ── Name type-ahead suggestion list ── */
+    #nameMatches { border: 1px solid var(--border); border-radius: 10px;
+                   margin-top: 8px; overflow: hidden; background: #fff; }
+    .nm-row { display: flex; align-items: center; gap: 12px;
+              padding: 10px 14px; cursor: pointer;
+              border-top: 1px solid var(--border); }
+    .nm-row:first-child { border-top: none; }
+    .nm-row:hover { background: var(--cat-bg); }
+    /* Exactly one match left — highlight it so the operator knows Enter/Tab
+       will accept it. */
+    .nm-row.nm-unique { background: rgba(139,175,58,.14); }
+    .nm-name { font-weight: 700; color: var(--brown); }
+    .nm-brand { font-size: .75rem; color: #777; }
+    .nm-code { font-family: monospace; color: #777; margin-left: auto; }
+    .nm-hint { padding: 8px 14px; font-size: .75rem; color: #777;
+               background: #fafaf5; border-top: 1px solid var(--border); }
+    .nm-hint:first-child { border-top: none; }
   </style>
 
   <div class="card">
-    <h2>This Order</h2>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:16px;">
+      <h2 style="margin:0;">This Order</h2>
+      <button id="btnRecipe" class="btn btn-secondary" <?= $order ? '' : 'disabled' ?>>🍲 Suggest Recipe</button>
+    </div>
     <div class="stat-grid" style="margin-bottom:12px;">
       <div class="stat"><div class="v" id="statCount">0</div><div class="k">Items Scanned</div></div>
       <div class="stat"><div class="v" id="statUnique">0</div><div class="k">Unique Generics</div></div>
@@ -188,6 +225,12 @@ renderHead('Scan');
       <tbody></tbody>
     </table>
     <style>
+      /* Generic-name links open AI prep tips; dotted underline + help cursor
+         so they read as "more info" rather than navigation. */
+      .prep-link { color: var(--brown); font-weight: 600;
+                   text-decoration: underline dotted; text-underline-offset: 3px;
+                   cursor: help; }
+      .prep-link:hover { color: var(--green); }
       .btn-x { background: var(--red); color: #fff; border: none;
                border-radius: 8px; width: 44px; height: 44px;
                font-size: 1.3rem; font-weight: 800; cursor: pointer;
@@ -212,30 +255,37 @@ const state = {
 // Settings page in ounces.
 const TARE_LBS = <?= json_encode($tareLbs) ?>;
 
-// Audible alert for operator-action-required events: produce weight entry,
-// or an unknown UPC that needs a manual name. Web Audio so no asset file is
-// needed; double tone so it's distinct from incidental beeps.
+// Audible alerts for operator-action-required events, rendered with Web
+// Audio so no asset file is needed. Two distinct sounds so the operator can
+// tell them apart without looking at the screen:
+//   alertBeep() — rising two-tone chirp: produce weight entry.
+//   errorBeep() — harsh descending buzz: unknown UPC needing a manual name.
 let audioCtx = null;
-function alertBeep() {
+function playTones(tones) {
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
-    const playTone = (start, freq, dur) => {
+    const t0 = audioCtx.currentTime;
+    for (const [offset, freq, dur, type] of tones) {
       const osc  = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
-      osc.type = 'square';
+      osc.type = type || 'square';
       osc.frequency.value = freq;
+      const start = t0 + offset;
       gain.gain.setValueAtTime(0, start);
       gain.gain.linearRampToValueAtTime(0.30, start + 0.012);
       gain.gain.setValueAtTime(0.30, start + dur - 0.02);
       gain.gain.linearRampToValueAtTime(0, start + dur);
       osc.connect(gain); gain.connect(audioCtx.destination);
       osc.start(start); osc.stop(start + dur + 0.01);
-    };
-    const t = audioCtx.currentTime;
-    playTone(t,        880,  0.18);
-    playTone(t + 0.22, 1175, 0.22);
+    }
   } catch (e) { /* audio unavailable — fail silently */ }
+}
+function alertBeep() {
+  playTones([[0, 880, 0.18], [0.22, 1175, 0.22]]);
+}
+function errorBeep() {
+  playTones([[0, 330, 0.16, 'sawtooth'], [0.20, 220, 0.34, 'sawtooth']]);
 }
 
 const $ = (id) => document.getElementById(id);
@@ -291,42 +341,226 @@ async function startOrderIfNeeded() {
   $('orderStartLabel').textContent = 'Started ' + r.started_at;
   $('btnEnd').disabled = false;
   $('btnCancel').disabled = false;
+  $('btnRecipe').disabled = false;
   resetTable();
   return true;
 }
 
+// After ending or cancelling, reload the page so the "This Order" table and
+// stats start from a clean slate. The query params carry the confirmation
+// message across the refresh (rendered server-side into #orderStartLabel).
 $('btnEnd').addEventListener('click', async () => {
   const r = await postJson('../api_order.php', {action:'end'});
   if (!r.ok) { alert(r.error || 'Could not end order'); return; }
-  state.orderId = null;
-  $('orderNumLabel').textContent = '— not started —';
-  $('orderStartLabel').textContent = 'Order #' + r.order_id + ' closed at ' + r.ended_at;
-  $('btnEnd').disabled = true;
-  $('btnCancel').disabled = true;
-  refocus();
+  location.href = location.pathname
+    + '?closed=' + encodeURIComponent(r.order_id)
+    + '&at=' + encodeURIComponent(r.ended_at || '');
 });
 
 $('btnCancel').addEventListener('click', async () => {
   const r = await postJson('../api_order.php', {action:'cancel'});
   if (!r.ok) { alert(r.error || 'Could not cancel order'); return; }
-  state.orderId = null;
-  $('orderNumLabel').textContent = '— not started —';
-  $('orderStartLabel').textContent = 'Order #' + r.order_id + ' cancelled — scans discarded';
-  $('btnEnd').disabled = true;
-  $('btnCancel').disabled = true;
-  resetTable();
-  refocus();
+  location.href = location.pathname + '?cancelled=' + encodeURIComponent(r.order_id);
+});
+
+// The confirmation is already rendered into the page, so drop the query
+// params — a later manual refresh shouldn't re-show a stale message.
+if (location.search) history.replaceState(null, '', location.pathname);
+
+// ── AI kitchen help: recipe from the order / prep tips per item ──────────
+// Both features fetch text from api_kitchen.php and route it to the printer
+// via a print-formatted popup window. The window must be opened synchronously
+// in the click handler (popup blockers reject async window.open), so it shows
+// a "working" note until the AI text arrives, then triggers the print dialog.
+function openPrintWindow(title) {
+  const w = window.open('', '_blank');
+  if (!w) {
+    flash('Popup blocked — allow popups for this site so the printout can open.', 'error');
+    return null;
+  }
+  w.document.write('<!doctype html><title>' + escape(title) + '</title>'
+    + '<body style="font:16px Georgia,serif; padding:40px; color:#333;">'
+    + 'Asking the AI… this can take a few seconds.</body>');
+  w.document.close();
+  return w;
+}
+
+function printText(w, title, text) {
+  if (w.closed) return;  // operator closed the tab while waiting
+  w.document.open();
+  w.document.write('<!doctype html><html><head><title>' + escape(title) + '</title><style>'
+    + 'body { font: 15px/1.6 Georgia, serif; color: #222; margin: 40px auto; max-width: 680px; }'
+    + 'h1 { font-size: 1.5rem; margin-bottom: 4px; }'
+    + '.meta { font-size: .8rem; color: #777; margin-bottom: 20px; }'
+    + 'pre { white-space: pre-wrap; font: inherit; }'
+    + '.foot { font-size: .75rem; color: #777; border-top: 1px solid #ccc; margin-top: 24px; padding-top: 8px; }'
+    + '</style></head><body>'
+    + '<h1>' + escape(title) + '</h1>'
+    + '<div class="meta">' + new Date().toLocaleString() + '</div>'
+    + '<pre>' + escape(text) + '</pre>'
+    + '<div class="foot">AI-generated suggestion — use your judgment on quantities and cooking times.</div>'
+    + '</body></html>');
+  w.document.close();
+  w.focus();
+  // Same-origin about:blank renders synchronously after close(); the short
+  // delay just lets fonts/layout settle before the print dialog opens.
+  setTimeout(() => { try { w.print(); } catch (e) { /* window closed */ } }, 300);
+}
+
+$('btnRecipe').addEventListener('click', async () => {
+  if (!state.orderId) { flash('No open order — scan items first.', 'info'); return; }
+  const w = openPrintWindow('Recipe Suggestion');
+  if (!w) return;
+  const btn = $('btnRecipe');
+  btn.disabled = true;
+  try {
+    const r = await postJson('../api_kitchen.php', {action: 'recipe'});
+    if (!r.ok) { w.close(); flash(r.error || 'Could not get a recipe', 'error'); return; }
+    printText(w, 'Recipe Suggestion — Order #' + r.order_id, r.text);
+  } catch (e) {
+    w.close();
+    flash('Recipe request failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    refocus();
+  }
+});
+
+// Delegated: rows are re-rendered per scan, so listen on the table instead of
+// binding each link.
+$('scanTable').addEventListener('click', async (e) => {
+  const a = e.target.closest('a.prep-link');
+  if (!a) return;
+  e.preventDefault();
+  const name = a.dataset.name;
+  const w = openPrintWindow('How to Prepare & Serve');
+  if (!w) return;
+  try {
+    const r = await postJson('../api_kitchen.php', {action: 'prepare', generic_name: name});
+    if (!r.ok) { w.close(); flash(r.error || 'Could not get preparation tips', 'error'); return; }
+    printText(w, 'How to Prepare & Serve: ' + name, r.text);
+  } catch (e2) {
+    w.close();
+    flash('Preparation-tips request failed: ' + e2.message, 'error');
+  } finally {
+    refocus();
+  }
 });
 
 barcodeInput.addEventListener('keydown', async (e) => {
+  if (e.key === 'Escape') {
+    barcodeInput.value = '';
+    hideNameMatches();
+    return;
+  }
   // Accept either Enter or Tab as the scanner's terminator.
   if (e.key !== 'Enter' && e.key !== 'Tab') return;
   e.preventDefault();
   const code = barcodeInput.value.trim();
-  barcodeInput.value = '';
   if (!code) return;
+  // Letters present → this is a name query, not a barcode. Accept it only
+  // if it narrows the lookup tables to exactly one name.
+  if (isNameQuery(code)) {
+    await tryAcceptName(code);
+    return;
+  }
+  barcodeInput.value = '';
+  hideNameMatches();
   await handleScan(code);
 });
+
+// ── Add-by-name type-ahead ───────────────────────────────────────────────
+// Typing letters into the barcode field searches the lookup-table names
+// (produce codes + cached UPCs). Once the text matches exactly one name,
+// Enter or Tab records that item via its PLU/UPC, same as a scan. A scanner
+// burst is all digits, so it never triggers this path.
+let nameMatches = [];      // matches currently rendered in the list
+let nameTotal = 0;         // total distinct names matched (may exceed list)
+let nameSearchTimer = null;
+let nameSearchSeq = 0;     // discard out-of-order responses
+const nameBox = $('nameMatches');
+
+function isNameQuery(v) { return /[a-z]/i.test(v); }
+
+function hideNameMatches() {
+  nameBox.style.display = 'none';
+  nameBox.innerHTML = '';
+  nameMatches = [];
+  nameTotal = 0;
+}
+
+barcodeInput.addEventListener('input', () => {
+  const v = barcodeInput.value.trim();
+  clearTimeout(nameSearchTimer);
+  if (!isNameQuery(v) || v.length < 2) { hideNameMatches(); return; }
+  nameSearchTimer = setTimeout(async () => {
+    const seq = ++nameSearchSeq;
+    const r = await postJson('../api_scan.php', {action:'search', q: v});
+    if (seq !== nameSearchSeq) return;                       // superseded
+    if (!isNameQuery(barcodeInput.value.trim())) return;     // cleared/scanned meanwhile
+    if (!r.ok) {
+      // Distinguish a server/API failure from a genuine zero-match result —
+      // e.g. a stale api_scan.php without the search action answers
+      // "Missing barcode", which must not read as "no such item".
+      nameMatches = [];
+      nameTotal = 0;
+      nameBox.innerHTML = '<div class="nm-hint">⚠ Name search unavailable: '
+        + escape(r.error || 'server error') + '</div>';
+      nameBox.style.display = 'block';
+      return;
+    }
+    nameMatches = r.matches || [];
+    nameTotal   = r.total || nameMatches.length;
+    renderNameMatches();
+  }, 200);
+});
+
+function renderNameMatches() {
+  if (!nameTotal) {
+    nameBox.innerHTML = '<div class="nm-hint">No matching names in the lookup tables.</div>';
+    nameBox.style.display = 'block';
+    return;
+  }
+  const unique = nameTotal === 1;
+  nameBox.innerHTML = nameMatches.map((m, i) =>
+    `<div class="nm-row${unique ? ' nm-unique' : ''}" onclick="acceptNameMatch(${i})">
+       <div>
+         <div class="nm-name">${escape(m.name)}</div>
+         ${m.brand ? '<div class="nm-brand">' + escape(m.brand) + '</div>' : ''}
+       </div>
+       <div class="nm-code">${escape(m.code)}</div>
+     </div>`).join('')
+    + `<div class="nm-hint">${unique
+        ? '↵ Press Enter or Tab to add this item'
+        : nameTotal + ' matches — keep typing to narrow to one, or tap the item.'}</div>`;
+  nameBox.style.display = 'block';
+}
+
+// Enter/Tab on a name query: re-query so the decision is never based on a
+// stale (still-debouncing) result, then accept only a unique match.
+async function tryAcceptName(q) {
+  clearTimeout(nameSearchTimer);
+  const r = await postJson('../api_scan.php', {action:'search', q});
+  if (!r.ok) { flash(r.error || 'Name search failed', 'error'); return; }
+  nameMatches = r.matches || [];
+  nameTotal   = r.total || nameMatches.length;
+  if (nameTotal === 1) {
+    await acceptNameMatch(0);
+    return;
+  }
+  renderNameMatches();
+  flash(nameTotal ? nameTotal + ' names match — keep typing to narrow to one.'
+                  : 'No lookup names match "' + q + '".', 'info');
+}
+
+async function acceptNameMatch(i) {
+  const m = nameMatches[i];
+  if (!m) return;
+  barcodeInput.value = '';
+  hideNameMatches();
+  await handleScan(m.code);   // records via the item's PLU/UPC, same as a scan
+  refocus();
+}
 
 // Visual indicator: highlight the input when it has focus so the operator
 // instantly knows the scanner will land in the right place.
@@ -506,7 +740,7 @@ function openNameModal(barcode) {
   const m = $('namePrompt');
   m.style.display = 'flex';
   m.setAttribute('aria-hidden', 'false');
-  alertBeep();
+  errorBeep();
   setTimeout(() => $('nameGeneric').focus(), 0);
 }
 function closeNameModal() {
@@ -668,7 +902,9 @@ function appendRow(it) {
   const tr = document.createElement('tr');
   const t = new Date().toLocaleTimeString();
   tr.dataset.scanId = it.id || '';
-  tr.innerHTML = `<td>${t}</td><td>${escape(it.generic_name)}</td>
+  tr.innerHTML = `<td>${t}</td>
+    <td><a href="#" class="prep-link" title="How do I prepare this item?"
+           data-name="${escape(it.generic_name)}">${escape(it.generic_name)}</a></td>
     <td>${it.kind}</td><td class="num">${it.quantity || ''}</td>
     <td class="num">${it.weight_lbs ? Number(it.weight_lbs).toFixed(2) : ''}</td>
     <td>${escape(it.barcode)}</td>
