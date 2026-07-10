@@ -243,6 +243,100 @@ renderNav('report');
     <p id="orderMsg" style="font-size:.85rem; font-weight:700; margin-top:8px;"></p>
   </div>
 
+  <div class="card no-print">
+    <h2>Reorder Alerts</h2>
+    <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
+      A reminder shows on this page whenever an item's projected days-of-stock
+      falls below its alert lead time. Lead time here is the fulfillment window
+      you want to leave for the supplier. Tick <strong>Email</strong> on an alert
+      to also have the reorder reminder emailed to the administrator
+      <?php $adminEmail = trim((string)(setting('admin_email', '') ?? '')); ?>
+      <?php if ($adminEmail !== ''): ?>
+        (<strong><?= htmlspecialchars($adminEmail) ?></strong>)
+      <?php endif; ?>
+      by the scheduled reorder-alert job (see Settings → Email Notifications).
+    </p>
+    <?php if ($adminEmail === ''): ?>
+      <div class="banner warn" style="margin-bottom:12px;">
+        <div>
+          No administrator email is set, so reorder reminders can't be emailed.
+          Add one under <a href="../../settings/">Settings → Administrator Email &amp; Password</a>.
+        </div>
+      </div>
+    <?php endif; ?>
+    <form method="post" action="../../api_alert.php" class="row" style="margin-bottom:14px;">
+      <input type="hidden" name="action" value="add">
+      <div style="flex:2 1 220px;">
+        <label>Item</label>
+        <select name="generic_name" required>
+          <option value="">— select —</option>
+          <?php
+          // $rows is ordered by order request (largest first) for the
+          // recommendations table; the dropdown lists the same items a→z.
+          $alertItems = array_column($rows, 'name');
+          usort($alertItems, 'strcasecmp');
+          ?>
+          <?php foreach ($alertItems as $n): ?>
+            <option value="<?= htmlspecialchars($n) ?>"><?= htmlspecialchars($n) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div>
+        <label>Lead Time (days)</label>
+        <input type="number" name="lead_time_days" min="1" value="<?= $leadTime ?>" required>
+      </div>
+      <div style="flex:0 0 120px;">
+        <label>&nbsp;</label>
+        <button type="submit" class="btn btn-primary btn-block">Add</button>
+      </div>
+    </form>
+    <?php
+    $a = $db->query("SELECT id, generic_name, lead_time_days, enabled, email_enabled FROM alerts ORDER BY generic_name");
+    $aRows = $a->fetchAll();
+    ?>
+    <?php if ($aRows): ?>
+    <table class="data">
+      <thead><tr>
+        <th>Item</th>
+        <th class="num">Lead Time</th>
+        <th>Status</th>
+        <th title="Email this reorder reminder to the administrator">Email</th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        <?php foreach ($aRows as $row): ?>
+          <tr>
+            <td><?= htmlspecialchars($row['generic_name']) ?></td>
+            <td class="num"><?= (int)$row['lead_time_days'] ?> days</td>
+            <td><?= $row['enabled'] ? 'On' : 'Off' ?></td>
+            <td>
+              <!-- Auto-submits on toggle. The hidden 0 precedes the checkbox so
+                   an unchecked box still posts email=0 (last value wins). -->
+              <form method="post" action="../../api_alert.php" style="display:inline; margin:0;">
+                <input type="hidden" name="action" value="set_email">
+                <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
+                <input type="hidden" name="email" value="0">
+                <input type="checkbox" name="email" value="1" style="width:auto; cursor:pointer;"
+                       onchange="this.form.submit()"
+                       <?= $row['email_enabled'] ? 'checked' : '' ?>>
+              </form>
+            </td>
+            <td>
+              <form method="post" action="../../api_alert.php" style="display:inline;">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
+                <button class="btn btn-secondary" style="padding:4px 10px; font-size:.8rem;">Remove</button>
+              </form>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+      </tbody>
+    </table>
+    <?php else: ?>
+      <p style="color:#777;">No alerts configured.</p>
+    <?php endif; ?>
+  </div>
+
   <div class="card">
     <h2>Order Recommendations</h2>
     <?php if (!$rows): ?>
@@ -323,94 +417,6 @@ renderNav('report');
       </tbody>
     </table>
     </div>
-    <?php endif; ?>
-  </div>
-
-  <div class="card no-print">
-    <h2>Reorder Alerts</h2>
-    <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
-      A reminder shows on this page whenever an item's projected days-of-stock
-      falls below its alert lead time. Lead time here is the fulfillment window
-      you want to leave for the supplier. Tick <strong>Email</strong> on an alert
-      to also have the reorder reminder emailed to the administrator
-      <?php $adminEmail = trim((string)(setting('admin_email', '') ?? '')); ?>
-      <?php if ($adminEmail !== ''): ?>
-        (<strong><?= htmlspecialchars($adminEmail) ?></strong>)
-      <?php endif; ?>
-      by the scheduled reorder-alert job (see Settings → Email Notifications).
-    </p>
-    <?php if ($adminEmail === ''): ?>
-      <div class="banner warn" style="margin-bottom:12px;">
-        <div>
-          No administrator email is set, so reorder reminders can't be emailed.
-          Add one under <a href="../../settings/">Settings → Administrator Email &amp; Password</a>.
-        </div>
-      </div>
-    <?php endif; ?>
-    <form method="post" action="../../api_alert.php" class="row" style="margin-bottom:14px;">
-      <input type="hidden" name="action" value="add">
-      <div style="flex:2 1 220px;">
-        <label>Item</label>
-        <select name="generic_name" required>
-          <option value="">— select —</option>
-          <?php foreach ($rows as $r): ?>
-            <option value="<?= htmlspecialchars($r['name']) ?>"><?= htmlspecialchars($r['name']) ?></option>
-          <?php endforeach; ?>
-        </select>
-      </div>
-      <div>
-        <label>Lead Time (days)</label>
-        <input type="number" name="lead_time_days" min="1" value="<?= $leadTime ?>" required>
-      </div>
-      <div style="flex:0 0 120px;">
-        <label>&nbsp;</label>
-        <button type="submit" class="btn btn-primary btn-block">Add</button>
-      </div>
-    </form>
-    <?php
-    $a = $db->query("SELECT id, generic_name, lead_time_days, enabled, email_enabled FROM alerts ORDER BY generic_name");
-    $aRows = $a->fetchAll();
-    ?>
-    <?php if ($aRows): ?>
-    <table class="data">
-      <thead><tr>
-        <th>Item</th>
-        <th class="num">Lead Time</th>
-        <th>Status</th>
-        <th title="Email this reorder reminder to the administrator">Email</th>
-        <th></th>
-      </tr></thead>
-      <tbody>
-        <?php foreach ($aRows as $row): ?>
-          <tr>
-            <td><?= htmlspecialchars($row['generic_name']) ?></td>
-            <td class="num"><?= (int)$row['lead_time_days'] ?> days</td>
-            <td><?= $row['enabled'] ? 'On' : 'Off' ?></td>
-            <td>
-              <!-- Auto-submits on toggle. The hidden 0 precedes the checkbox so
-                   an unchecked box still posts email=0 (last value wins). -->
-              <form method="post" action="../../api_alert.php" style="display:inline; margin:0;">
-                <input type="hidden" name="action" value="set_email">
-                <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
-                <input type="hidden" name="email" value="0">
-                <input type="checkbox" name="email" value="1" style="width:auto; cursor:pointer;"
-                       onchange="this.form.submit()"
-                       <?= $row['email_enabled'] ? 'checked' : '' ?>>
-              </form>
-            </td>
-            <td>
-              <form method="post" action="../../api_alert.php" style="display:inline;">
-                <input type="hidden" name="action" value="delete">
-                <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
-                <button class="btn btn-secondary" style="padding:4px 10px; font-size:.8rem;">Remove</button>
-              </form>
-            </td>
-          </tr>
-        <?php endforeach; ?>
-      </tbody>
-    </table>
-    <?php else: ?>
-      <p style="color:#777;">No alerts configured.</p>
     <?php endif; ?>
   </div>
 

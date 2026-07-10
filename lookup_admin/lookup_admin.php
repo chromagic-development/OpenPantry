@@ -94,8 +94,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$produce = $db->query("SELECT code, generic_name, unit FROM produce_lookup ORDER BY generic_name")->fetchAll();
-$upcs    = $db->query("SELECT upc, brand_name, generic_name, source, created_at FROM upc_lookup ORDER BY updated_at DESC, created_at DESC LIMIT 500")->fetchAll();
+$produce = $db->query("SELECT code, generic_name, unit FROM produce_lookup ORDER BY generic_name COLLATE NOCASE")->fetchAll();
+// Show the 500 most recently touched UPCs, sorted alphabetically by generic name.
+$upcs    = $db->query(
+    "SELECT * FROM (
+       SELECT upc, brand_name, generic_name, source, created_at FROM upc_lookup
+       ORDER BY updated_at DESC, created_at DESC LIMIT 500
+     ) ORDER BY generic_name COLLATE NOCASE"
+)->fetchAll();
 
 renderHead('Lookup Tables');
 renderNav('lookup');

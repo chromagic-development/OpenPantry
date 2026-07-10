@@ -175,28 +175,41 @@ const state = {
 // Settings page in ounces.
 const TARE_LBS = <?= json_encode($tareLbs) ?>;
 
-// Short confirmation beep on every accepted camera scan, mimicking a hardware
-// barcode scanner. Web Audio so no asset file is needed; a single tone keeps
-// it distinct from any multi-tone alerts. The AudioContext is unlocked by the
-// Start Camera click (a user gesture), so resume() succeeds here.
+// Audible feedback, rendered with Web Audio so no asset file is needed. The
+// AudioContext is unlocked by the Start Camera click (a user gesture), so
+// resume() succeeds here. Three distinct sounds, matching scan.php:
+//   scanBeep()  — single short tone: camera registered a barcode.
+//   alertBeep() — rising two-tone chirp: produce weight entry.
+//   errorBeep() — harsh descending buzz: barcode the lookup can't resolve.
 let audioCtx = null;
-function scanBeep() {
+function playTones(tones) {
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
-    const t    = audioCtx.currentTime;
-    const dur  = 0.12;
-    const osc  = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = 'square';
-    osc.frequency.value = 1046; // ~C6, crisp and clearly audible
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(0.30, t + 0.012);
-    gain.gain.setValueAtTime(0.30, t + dur - 0.02);
-    gain.gain.linearRampToValueAtTime(0, t + dur);
-    osc.connect(gain); gain.connect(audioCtx.destination);
-    osc.start(t); osc.stop(t + dur + 0.01);
+    const t0 = audioCtx.currentTime;
+    for (const [offset, freq, dur, type] of tones) {
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type || 'square';
+      osc.frequency.value = freq;
+      const start = t0 + offset;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(0.30, start + 0.012);
+      gain.gain.setValueAtTime(0.30, start + dur - 0.02);
+      gain.gain.linearRampToValueAtTime(0, start + dur);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(start); osc.stop(start + dur + 0.01);
+    }
   } catch (e) { /* audio unavailable — fail silently */ }
+}
+function scanBeep() {
+  playTones([[0, 1046, 0.12]]); // ~C6, crisp and clearly audible
+}
+function alertBeep() {
+  playTones([[0, 880, 0.18], [0.22, 1175, 0.22]]);
+}
+function errorBeep() {
+  playTones([[0, 330, 0.16, 'sawtooth'], [0.20, 220, 0.34, 'sawtooth']]);
 }
 
 const $ = (id) => document.getElementById(id);
@@ -297,7 +310,15 @@ $('manualInput').addEventListener('keydown', e => {
 async function handleScan(code) {
   if (!(await startOrderIfNeeded())) return;
   const lk = await postJson('../api_scan.php', {action:'lookup', barcode: code});
-  if (!lk.ok) { flash(lk.error || 'Unknown barcode', 'error'); showLast('Unknown', code, ''); return; }
+  if (!lk.ok) {
+    // Unknown barcode: this page has no name-entry modal, so the scan is
+    // dropped. Distinct error buzz (same sound as scan.php's unknown-UPC
+    // prompt) so the operator knows to look at the screen.
+    errorBeep();
+    flash(lk.error || 'Unknown barcode', 'error');
+    showLast('Unknown', code, '');
+    return;
+  }
   if (lk.kind === 'produce' && lk.needs_weight) {
     state.pendingProduce = { barcode: code, generic_name: lk.generic_name };
     state.weightDigits = '';
@@ -316,6 +337,7 @@ function openWeightModal() {
   m.setAttribute('aria-hidden', 'false');
   weightError('');
   renderWeight();
+  alertBeep();
   setTimeout(() => $('weightInput').focus(), 0);
 }
 function closeWeightModal() {

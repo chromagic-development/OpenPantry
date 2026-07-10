@@ -238,7 +238,7 @@ if (!isAuthenticated($adminPassword)) {
   <div class="card" style="margin-bottom:20px;">
     <div style="padding:16px 20px; display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap;">
       <div style="flex:1 1 320px;">
-        <label for="clientNotes" style="display:block; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.4px; color:var(--brown); margin-bottom:6px;">Special Notes to Clients</label>
+        <label for="clientNotes" style="display:block; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.4px; color:var(--brown); margin-bottom:6px;">Announcement</label>
         <input type="text" id="clientNotes"
                placeholder="Optional note shown at the top of the order form — leave blank to show nothing"
                style="width:100%; border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:.9rem; background:#fafaf5;">

@@ -401,8 +401,18 @@ function googleTranslateElementInit() {
 
 function triggerGoogleTranslate(lang) {
   localStorage.setItem('fp_lang', lang);
-  var gtSel = document.querySelector('#google_translate_element select');
-  if (gtSel) { gtSel.value = lang; gtSel.dispatchEvent(new Event('change')); }
+  // Nudging the hidden widget select with a change event is unreliable once a
+  // translation is already active, so instead persist the choice in the
+  // `googtrans` cookie Google Translate reads on page load, then reload.
+  // Clear every variant the widget may have set (with/without domain).
+  var kill = 'googtrans=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  document.cookie = kill;
+  document.cookie = kill + '; domain=' + location.hostname;
+  document.cookie = kill + '; domain=.' + location.hostname;
+  if (lang !== 'en') {
+    document.cookie = 'googtrans=/en/' + lang + '; path=/';
+  }
+  location.reload();
 }
 
 // 2. Banner Logic
