@@ -123,10 +123,10 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
   pantry's public WiFi address) and to configurable weekly **allowed hours**.
   Both live in `auth.php`; leave the IP blank to allow all.
 - **Field-level encryption.** PII security and privacy is paramount.
-  Sensitive columns are encrypted at rest with libsodium (`crypto.php`): 
-  `settings.openai_api_key`, `settings.allowed_ip`, and delivery clients'
-  `address` / `city` / `phone`. The 32-byte key lives in `encryption_key.php`,
-  generated on first use.
+  Sensitive columns are encrypted at rest with libsodium (`crypto.php`):
+  **every `settings` value** (the hashed `admin_password` and a migration
+  flag excepted) and delivery clients' `address` / `city` / `phone`. The
+  32-byte key lives in `encryption_key.php`, generated on first use.
 
   > ⚠️ **Back up `encryption_key.php` and keep it out of version control.**
   > Losing it makes all encrypted data permanently unrecoverable. It's
@@ -148,6 +148,7 @@ root.
 openpantry/
 ├── index.php          ← dashboard (served at /openpantry/)
 ├── schema.sql         library: SQLite schema
+├── paths.php          library: database locations (OPENPANTRY_DB_DIR)
 ├── db.php             library: PDO + first-run seed + idempotent migrations
 ├── auth.php           library: shared login + IP/time access gate
 ├── crypto.php         library: field-level encryption + password hashing
@@ -188,7 +189,9 @@ openpantry/
 ```
 
 Two SQLite files are created automatically: `openpantry.db` at the root and
-`menucounter/picklist.db` for the ordering app.
+`menucounter/picklist.db` for the ordering app. On a real deployment, move
+them out of the web root — see **Keeping the data files out of the web root**
+below.
 
 ---
 
@@ -254,15 +257,51 @@ If OpenAI picks a generic name you don't like (e.g. `Beans` when you wanted
 `Black Beans`), open **Lookup Tables → UPC → Generic Cache** and edit it
 in place. Future scans use your edit.
 
+## Keeping the data files out of the web root
+
+Both SQLite databases and the field-encryption key default to living inside
+the app folder so a first run needs zero configuration — but anything under
+`public_html` can be **downloaded by anyone who guesses the URL** (client
+names and order history included). On a real deployment, move all three
+above the web root:
+
+1. Create two folders **next to** `public_html` (not inside it), e.g.
+   `openpantry_secret/` for the key and `openpantry_data/` for the databases.
+   (The app creates `openpantry_data/` itself if it can.)
+2. Add two `SetEnv` lines to `openpantry/.htaccess` (absolute paths, no
+   spaces):
+
+   ```apache
+   SetEnv OPENPANTRY_KEY_PATH /home/you/domains/example.org/openpantry_secret/encryption_key.php
+   SetEnv OPENPANTRY_DB_DIR /home/you/domains/example.org/openpantry_data
+   ```
+
+3. Load any page. The key file is copied to the new location and both
+   databases are moved there automatically (their WAL journals are
+   checkpointed into the main files first, so nothing is lost). After
+   confirming the app still works, delete any old `encryption_key.php` left
+   inside the web root.
+4. Defense in depth — also refuse to serve database files over HTTP, in case
+   one ever lands in the web tree again. In the same `openpantry/.htaccess`:
+
+   ```apache
+   <FilesMatch "\.(db|db-wal|db-shm|sqlite)$">
+     Require all denied
+   </FilesMatch>
+   ```
+
+5. Verify: `https://your-site/openpantry/openpantry.db` and
+   `.../openpantry/menucounter/picklist.db` should now return 403/404 instead
+   of downloading, and the app pages should all still work.
+
+The cron mailer reads the same `SetEnv` lines straight out of `.htaccess`
+when run from the command line, so the cron job needs no changes.
+
 ## Files for scheduled backups
 
-- openpantry.db SQLite database located in openpantry/
-- picklist.db SQLite database for the menu counter and delivery modules
-  located in openpantry/menucounter/
-- openpantry_secret/encryption_key.php should be placed at the same level as
-  the public_html directory to secure it from the website and only needs to be
-  backed up one time after it is created by the app. For example, create or edit
-  an openpantry/.htaccess file to contain SetEnv OPENPANTRY_KEY_PATH 
-  /home/footprin/domains/DOMAIN_DIRECTORY_NAME/openpantry_secret/encryption_key.php
-  and place the created encryption_key.php in that directory.
-  SetEnv OPENPANTRY_KEY_PATH /home/footprin/domains/DOMAIN_DIRECTORY_NAME/openpantry_secret/encryption_key.php
+- `openpantry.db` and `picklist.db`, both in `openpantry_data/` once
+  `OPENPANTRY_DB_DIR` is set (see above) — or, without it, in `openpantry/`
+  and `openpantry/menucounter/` respectively. **Re-point existing backup jobs
+  after moving the databases.**
+- `openpantry_secret/encryption_key.php` — needs to be backed up only once,
+  after the app creates it.

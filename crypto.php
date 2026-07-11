@@ -2,7 +2,8 @@
 // Field-level encryption for sensitive columns (libsodium / sodium_crypto_secretbox).
 //
 // Encrypts at rest:
-//   settings:         openai_api_key, allowed_ip
+//   settings:         EVERY value except the FS_UNENCRYPTED_SETTINGS
+//                     exemptions below (admin_password is hashed instead)
 //   delivery_clients: address, city, phone
 //
 // admin_password is NOT encrypted — it is one-way HASHED (password_hash) so
@@ -40,8 +41,19 @@
 //   orphan your encrypted data. After confirming the app still decrypts,
 //   delete the old web-root copy. See README for step-by-step.
 
-const FS_ENC_MARKER         = 'sb1:';
-const FS_ENCRYPTED_SETTINGS = ['openai_api_key', 'allowed_ip', 'smtp_pass'];
+const FS_ENC_MARKER = 'sb1:';
+
+// Every settings row is encrypted at rest EXCEPT these two:
+//   admin_password — protected by a stronger primitive (one-way password_hash,
+//     see below); wrapping the hash in ciphertext would break the raw reads in
+//     migrateHashAdminPassword() and gain nothing.
+//   enc_fields_v1 — plain migration bookkeeping ('1') that must stay readable
+//     even before sodium / the key file are available.
+const FS_UNENCRYPTED_SETTINGS = ['admin_password', 'enc_fields_v1'];
+
+function fsSettingIsEncrypted(string $key): bool {
+    return !in_array($key, FS_UNENCRYPTED_SETTINGS, true);
+}
 
 function fsCryptoAvailable(): bool {
     return function_exists('sodium_crypto_secretbox')

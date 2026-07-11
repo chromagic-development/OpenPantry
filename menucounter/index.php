@@ -29,7 +29,7 @@ $allItems = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // show every item (current behavior).
 $nondeliverable = [];
 try {
-    $fsDb = new PDO('sqlite:' . __DIR__ . '/../openpantry.db');
+    $fsDb = new PDO('sqlite:' . fsDbPath('openpantry.db'));
     $fsDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     foreach ($fsDb->query("SELECT generic_name FROM inventory WHERE deliverable = 0") as $r) {
         $nondeliverable[strtolower($r['generic_name'])] = true;

@@ -5,6 +5,8 @@
 // menucounter/db.php because its getDB() collides with FoodScan's, so this
 // file opens picklist.db with its own PDO handle.
 
+require_once __DIR__ . '/../paths.php'; // database locations (OPENPANTRY_DB_DIR)
+
 // Default cities, used until an admin customizes the list.
 function deliveryCitiesDefault(): array {
     return ['Eliot, ME', 'Kittery, ME'];
@@ -126,7 +128,7 @@ function setDeliveryGroupCities(array $map): void {
 function picklistDB(): ?PDO {
     static $db = null;
     if ($db !== null) return $db;
-    $path = __DIR__ . '/../menucounter/picklist.db';
+    $path = fsDbPath('picklist.db');
     if (!file_exists($path)) return null;
     try {
         $db = new PDO('sqlite:' . $path);

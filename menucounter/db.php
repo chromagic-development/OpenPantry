@@ -2,6 +2,7 @@
 // Read a setting out of openpantry.db (one folder up). Lives here so PantryPrep
 // pages can fetch `admin_password` / `allowed_ip` from FoodScan's settings
 // table without including foodscan/db.php (which would collide on getDB()).
+require_once __DIR__ . '/../paths.php';  // database locations (OPENPANTRY_DB_DIR)
 require_once __DIR__ . '/../crypto.php'; // shared field-level decryption + access-schedule eval
 
 // Match the FoodScan side (common.php) so date()-based logic — notably the
@@ -13,7 +14,7 @@ function foodscanSetting(string $key, ?string $default = null): ?string {
     static $missing = false;
     if ($missing) return $default;
     if ($fdb === null) {
-        $path = __DIR__ . '/../openpantry.db';
+        $path = fsDbPath('openpantry.db');
         if (!file_exists($path)) { $missing = true; return $default; }
         try {
             $fdb = new PDO('sqlite:' . $path);
@@ -28,8 +29,9 @@ function foodscanSetting(string $key, ?string $default = null): ?string {
         $s->execute([$key]);
         $v = $s->fetchColumn();
         if ($v === false) return $default;
-        // Sensitive keys (admin_password / allowed_ip) are encrypted at rest.
-        if (in_array($key, FS_ENCRYPTED_SETTINGS, true)) {
+        // Settings are encrypted at rest (admin_password stays a plain
+        // password_hash). fsDecrypt passes legacy plaintext through untouched.
+        if (fsSettingIsEncrypted($key)) {
             return fsDecrypt((string)$v);
         }
         return (string)$v;
@@ -39,7 +41,7 @@ function foodscanSetting(string $key, ?string $default = null): ?string {
 }
 
 function getDB() {
-    $dbPath = __DIR__ . '/picklist.db';
+    $dbPath = fsDbPath('picklist.db');
     $db = new PDO('sqlite:' . $dbPath);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 	$db->exec("PRAGMA journal_mode = WAL");

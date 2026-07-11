@@ -1,0 +1,11 @@
+# Never serve the SQLite databases (or their WAL sidecars) over HTTP. PHP opens
+# these files directly on disk, so denying web access is invisible to the app —
+# it only stops anyone from downloading openpantry.db / picklist.db by URL.
+#
+# This is defense in depth. The stronger fix is to move the databases out of the
+# web root entirely with OPENPANTRY_DB_DIR (see paths.php and the README), which
+# also needs its own SetEnv line here — but that path is deployment-specific and
+# is intentionally NOT committed.
+<FilesMatch "\.(db|db-wal|db-shm|sqlite)$">
+  Require all denied
+</FilesMatch>

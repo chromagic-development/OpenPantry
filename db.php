@@ -1,13 +1,14 @@
 <?php
 // SQLite connection + first-run schema/seed. Idempotent.
 
+require_once __DIR__ . '/paths.php';  // database locations (OPENPANTRY_DB_DIR)
 require_once __DIR__ . '/crypto.php'; // field-level encryption helpers
 
 function getDB(): PDO {
     static $db = null;
     if ($db !== null) return $db;
 
-    $path = __DIR__ . '/openpantry.db';
+    $path = fsDbPath('openpantry.db');
     $isNew = !file_exists($path);
 
     $db = new PDO('sqlite:' . $path);
@@ -42,10 +43,15 @@ function getDB(): PDO {
     // a one-way hash. Runs before the field-encryption migration so the latter
     // never re-encrypts the password.
     migrateHashAdminPassword($db);
-    // Encrypt existing plaintext in the sensitive settings + delivery_clients
-    // fields. Runs once (guarded by a settings flag); a no-op until a
-    // sodium-capable PHP is running.
+    // Encrypt existing plaintext in the delivery_clients PII fields. Runs once
+    // (guarded by a settings flag); a no-op until a sodium-capable PHP is
+    // running.
     migrateEncryptSensitiveFields($db);
+    // Encrypt every remaining plaintext settings value (all keys except the
+    // FS_UNENCRYPTED_SETTINGS exemptions). Flagless and self-healing — see the
+    // function comment. Runs after the password hashing above so a legacy
+    // plaintext admin_password becomes a hash, never ciphertext.
+    migrateEncryptSettings($db);
     return $db;
 }
 
@@ -70,13 +76,12 @@ function migrateHashAdminPassword(PDO $db): void {
        ->execute([fpHashAdminPassword($plain)]);
 }
 
-// One-time encryption of any still-plaintext values in the sensitive fields:
-//   settings.value for openai_api_key / admin_password / allowed_ip, and
-//   delivery_clients.address / city / phone.
-// Idempotent — already-encrypted (sb1:-marked) and empty values are skipped,
-// and the `enc_fields_v1` flag short-circuits subsequent loads. Deferred
-// while sodium is unavailable so it runs after a PHP upgrade rather than
-// marking itself done without actually encrypting anything.
+// One-time encryption of any still-plaintext delivery_clients address / city /
+// phone values. Idempotent — already-encrypted (sb1:-marked) and empty values
+// are skipped, and the `enc_fields_v1` flag short-circuits subsequent loads.
+// Deferred while sodium is unavailable so it runs after a PHP upgrade rather
+// than marking itself done without actually encrypting anything. (The settings
+// table is handled by the flagless migrateEncryptSettings() sweep instead.)
 function migrateEncryptSensitiveFields(PDO $db): void {
     if (!fsCryptoAvailable()) return;
     // Don't mark the migration done unless a real key is in hand (e.g. the dir
@@ -85,15 +90,6 @@ function migrateEncryptSensitiveFields(PDO $db): void {
     if (strlen(fsEncKey()) !== SODIUM_CRYPTO_SECRETBOX_KEYBYTES) return;
     $done = $db->query("SELECT value FROM settings WHERE key='enc_fields_v1'")->fetchColumn();
     if ($done === '1') return;
-
-    $sel = $db->prepare('SELECT value FROM settings WHERE key = ?');
-    $upd = $db->prepare('UPDATE settings SET value = ? WHERE key = ?');
-    foreach (FS_ENCRYPTED_SETTINGS as $k) {
-        $sel->execute([$k]);
-        $v = $sel->fetchColumn();
-        if ($v === false || $v === '' || fsIsEncrypted((string)$v)) continue;
-        $upd->execute([fsEncrypt((string)$v), $k]);
-    }
 
     $rows = $db->query('SELECT id, address, city, phone FROM delivery_clients')
                ->fetchAll(PDO::FETCH_ASSOC);
@@ -109,6 +105,26 @@ function migrateEncryptSensitiveFields(PDO $db): void {
 
     $db->prepare("INSERT INTO settings (key, value) VALUES ('enc_fields_v1', '1')
                   ON CONFLICT(key) DO UPDATE SET value='1'")->execute();
+}
+
+// Encrypt-at-rest sweep for the settings table: every row except the
+// FS_UNENCRYPTED_SETTINGS exemptions is stored as sb1: ciphertext. Runs on
+// every getDB() — the table is a couple dozen tiny rows and at steady state
+// this writes nothing — so plaintext defaults inserted later by INSERT OR
+// IGNORE migrations self-heal on the next load instead of needing a new
+// one-time flag each time a setting is added. Skipped until a sodium-capable
+// PHP and the real key are in hand, so values are never encrypted under a
+// missing or wrong key.
+function migrateEncryptSettings(PDO $db): void {
+    if (!fsCryptoAvailable()) return;
+    if (strlen(fsEncKey()) !== SODIUM_CRYPTO_SECRETBOX_KEYBYTES) return;
+    $upd = $db->prepare('UPDATE settings SET value = ? WHERE key = ?');
+    foreach ($db->query('SELECT key, value FROM settings')->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        $k = (string)$r['key'];
+        $v = (string)$r['value'];
+        if (!fsSettingIsEncrypted($k) || $v === '' || fsIsEncrypted($v)) continue;
+        $upd->execute([fsEncrypt($v), $k]);
+    }
 }
 
 // Adds inventory.deliverable (default 1) on installs that pre-date the
@@ -262,7 +278,7 @@ function migrateAdminAccessSettings(PDO $db): void {
         return; // already migrated (or seeded)
     }
 
-    $picklistPath = __DIR__ . '/menucounter/picklist.db';
+    $picklistPath = fsDbPath('picklist.db');
     if (!file_exists($picklistPath)) {
         // No legacy DB to migrate from — fall back to defaults.
         $db->prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_password', 'admin')")->execute();
@@ -299,17 +315,18 @@ function setting(string $key, ?string $default = null): ?string {
     $stmt->execute([$key]);
     $v = $stmt->fetchColumn();
     if ($v === false) return $default;
-    // Sensitive keys are encrypted at rest — decrypt on read.
-    if (in_array($key, FS_ENCRYPTED_SETTINGS, true)) {
+    // Settings are encrypted at rest — decrypt on read. fsDecrypt passes
+    // legacy plaintext values through untouched.
+    if (fsSettingIsEncrypted($key)) {
         return fsDecrypt((string)$v);
     }
     return $v;
 }
 
 function setSetting(string $key, string $value): void {
-    // Encrypt sensitive keys at rest. fsMaybeEncrypt is idempotent and leaves
-    // empty strings as ''.
-    if (in_array($key, FS_ENCRYPTED_SETTINGS, true)) {
+    // Encrypt at rest (every key except the FS_UNENCRYPTED_SETTINGS
+    // exemptions). fsMaybeEncrypt is idempotent and leaves empty strings as ''.
+    if (fsSettingIsEncrypted($key)) {
         $value = fsMaybeEncrypt($value);
     }
     $db = getDB();
