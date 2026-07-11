@@ -251,11 +251,29 @@ with a 6-second timeout. The full OFF export is ~50 GB, so shipping it isn't
 practical; the live API gives identical coverage on cache miss, and after the
 first scan the mapping is local-only.
 
-## Editing AI-derived generics
+## Implementation of AI and machine learning
 
-If OpenAI picks a generic name you don't like (e.g. `Beans` when you wanted
-`Black Beans`), open **Lookup Tables → UPC → Generic Cache** and edit it
-in place. Future scans use your edit.
+- The scan station has a "Create Recipe" feature where generative AI
+  can print a recipe for a client based on the order's ingredients as well
+  as a "How do I prepare this item?" option for each item in the client order.
+- The app classifies and maps brand labelled products to their generic named 
+  equivalents using a LLM to simplify tracking for which multiple brand names
+  are irrelevant noise. When corrections are made to any mappings, it further
+  "learns" what you expect by improving the multi-shot prompt. If OpenAI picks
+  a generic name you don't like (e.g. Beans when you wanted Black Beans), open
+  Lookup Tables → UPC → Generic Cache and edit it in place. Future scans use
+  your edit.
+- It also integrates paper checklists provided by delivery volunteers and
+  homebound clients who do not have Internet access by scanning them with a
+  multimodal LLM/CNN. This is a cheap and less fragile solution than traditional
+  OMR.
+- Furthermore, the prediction algorithm for restocking to optimize food
+  availability could be considered a rudimentary form of ML by implementing a
+  Poisson GLM where the linear model achieves a better fit as it "learns" with
+  more data.
+
+ Explore AI for Humanity at https://lnkd.in/gGWa93UM to learn more about how 
+ AI initiatives can make positive contributions to non-profits.
 
 ## Keeping the data files out of the web root
 
