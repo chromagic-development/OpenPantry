@@ -254,7 +254,7 @@ first scan the mapping is local-only.
 ## Implementation of AI and machine learning
 
 - The scan station has a "Create Recipe" feature where generative AI
-  can print a recipe for a client based on the order's ingredients as well
+  can print a recipe for a client based on their order's ingredients as well
   as a "How do I prepare this item?" option for each item in the client order.
 - The app classifies and maps brand labelled products to their generic named 
   equivalents using a LLM to simplify tracking for which multiple brand names
