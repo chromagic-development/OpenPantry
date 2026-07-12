@@ -1,9 +1,11 @@
 <?php
 require_once '../db.php';
+require_once __DIR__ . '/../../ratelimit.php'; // progressive login throttle + soft-lock
 $db = getDB();
 
 // admin_password lives in openpantry.db now — see foodscanSetting() in db.php.
 $adminPassword = foodscanSetting('admin_password', 'admin');
+$clientIp      = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
 
 // ── Persistent auth cookie (2 months) ────────────────────────────────────────
 // Uses header() directly for maximum PHP/server compatibility.
@@ -46,21 +48,43 @@ function isAuthenticated($password) {
 // openpantry.db; fpVerifyAdminPassword (crypto.php, included via ../db.php)
 // checks the submitted password against it. The cookie token still derives
 // from the stored hash, so setAuthCookie keeps using $adminPassword.
+// Attempts run through the shared progressive throttle (ratelimit.php):
+// flagged IPs wait, soft-locked IPs must also supply the emailed code.
 if (isset($_POST['action']) && $_POST['action'] === 'login') {
-    if (fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword)) {
-        setAuthCookie($adminPassword, $twoMonths);
+    $gate = fpLoginGate($clientIp, false);
+    if ($gate['mode'] === 'wait') {
+        $loginError = 'Too many failed attempts. ' . fpThrottleWaitText($gate['wait']);
     } else {
-        $loginError = 'Incorrect password.';
+        $passOk = fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword);
+        $otpOk  = ($gate['mode'] !== 'otp')
+               || fpLoginOtpCheck($clientIp, trim((string)($_POST['otp'] ?? '')));
+        if ($passOk && $otpOk) {
+            fpLoginRecordSuccess($clientIp);
+            setAuthCookie($adminPassword, $twoMonths);
+        } else {
+            fpLoginRecordFailure($clientIp);
+            $loginError = ($gate['mode'] === 'otp')
+                ? 'Incorrect password or security code.'
+                : 'Incorrect password.';
+        }
     }
 }
 
 // AJAX password check for the confirm-change modal. admin_password is a
 // one-way hash, so the check must happen server-side — the client can't
-// compare plaintext input against the stored value.
+// compare plaintext input against the stored value. Failures feed the same
+// per-IP throttle as the login form; the emailed-code stage doesn't apply
+// here because reaching this endpoint already requires a valid auth cookie
+// (isAuthenticated), which serves as the second factor.
 if (isset($_POST['action']) && $_POST['action'] === 'verify_password') {
     header('Content-Type: application/json');
-    $ok = isAuthenticated($adminPassword)
-          && fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword);
+    $gate = fpLoginGate($clientIp, false);
+    $ok   = false;
+    if ($gate['mode'] !== 'wait' && isAuthenticated($adminPassword)) {
+        $ok = fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword);
+        if ($ok) fpLoginRecordSuccess($clientIp);
+        else     fpLoginRecordFailure($clientIp);
+    }
     echo json_encode(['success' => $ok]);
     exit;
 }
@@ -79,6 +103,13 @@ if (isAuthenticated($adminPassword)) {
 
 // Show login wall if not authenticated
 if (!isAuthenticated($adminPassword)) {
+    // Rendering the wall is the one moment a soft-locked IP may trigger the
+    // (paced) security-code email — see fpLoginGate's $allowSend.
+    $gate   = fpLoginGate($clientIp, true);
+    $notice = $gate['note'];
+    if ($gate['mode'] === 'wait' && $notice === '') {
+        $notice = 'Too many failed attempts. ' . fpThrottleWaitText($gate['wait']);
+    }
 ?><!DOCTYPE html>
 <html lang="en">
 <head>
@@ -94,11 +125,12 @@ if (!isAuthenticated($adminPassword)) {
   .login-card h1 { font-size:1.1rem; color:var(--brown); margin-bottom:6px; }
   .login-card p  { font-size:.82rem; color:#888; margin-bottom:24px; }
   label { display:block; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.4px; color:var(--brown); margin-bottom:6px; }
-  input[type="password"] { width:100%; border:1px solid var(--border); border-radius:6px; padding:9px 12px; font-size:.95rem; margin-bottom:16px; background:#fafaf5; }
-  input[type="password"]:focus { outline:none; border-color:var(--green); }
+  input[type="password"], input[type="text"] { width:100%; border:1px solid var(--border); border-radius:6px; padding:9px 12px; font-size:.95rem; margin-bottom:16px; background:#fafaf5; }
+  input[type="password"]:focus, input[type="text"]:focus { outline:none; border-color:var(--green); }
   .btn-login { width:100%; background:var(--brown); color:#fff; border:none; border-radius:7px; padding:11px; font-size:1rem; font-weight:700; cursor:pointer; }
   .btn-login:hover { background:#8B6420; }
   .error { background:#F8D7DA; border:1px solid #F1AEB5; color:#8B1A1A; border-radius:6px; padding:10px 14px; font-size:.85rem; margin-bottom:16px; }
+  .notice { background:#FFF3CD; border:1px solid #E6D9A8; color:#6B5B11; border-radius:6px; padding:10px 14px; font-size:.85rem; margin-bottom:16px; }
 </style>
 </head>
 <body>
@@ -108,10 +140,18 @@ if (!isAuthenticated($adminPassword)) {
   <?php if (!empty($loginError)): ?>
     <div class="error">⚠ <?= htmlspecialchars($loginError) ?></div>
   <?php endif; ?>
+  <?php if ($notice !== ''): ?>
+    <div class="notice">🔐 <?= htmlspecialchars($notice) ?></div>
+  <?php endif; ?>
   <form method="POST">
     <input type="hidden" name="action" value="login">
     <label for="password">Password</label>
     <input type="password" id="password" name="password" autofocus placeholder="Enter password">
+    <?php if ($gate['mode'] === 'otp'): ?>
+      <label for="otp">Security Code</label>
+      <input type="text" id="otp" name="otp" inputmode="numeric"
+             autocomplete="one-time-code" maxlength="6" placeholder="6-digit emailed code">
+    <?php endif; ?>
     <button type="submit" class="btn-login">Log In</button>
   </form>
 </div>

@@ -9,7 +9,8 @@
 //                        in the same settings store. Empty value = no
 //                        restriction (lets you set it up first).
 
-require_once __DIR__ . '/crypto.php'; // fpVerifyAdminPassword, fsScheduleAllowsNow
+require_once __DIR__ . '/crypto.php';    // fpVerifyAdminPassword, fsScheduleAllowsNow
+require_once __DIR__ . '/ratelimit.php'; // progressive login throttle + soft-lock
 
 if (!defined('AUTH_COOKIE')) define('AUTH_COOKIE', 'fp_admin_auth');
 const FP_COOKIE_TTL = 5184000; // 60 days, matches admin/admin.php
@@ -48,24 +49,41 @@ function requireLogin(): void {
         exit;
     }
 
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
     $loginError = null;
     if (($_POST['fp_login_action'] ?? '') === 'login') {
-        if (fpVerifyAdminPassword($_POST['fp_login_password'] ?? '', $password)) {
-            // Cookie token is derived from the stored value ($password = the
-            // hash), so it persists across requests and auto-invalidates when
-            // the password (hash) changes.
-            fpSetAuthCookie($password, FP_COOKIE_TTL);
-            header('Location: ' . $_SERVER['REQUEST_URI']);
-            exit;
+        // Progressive throttle (ratelimit.php): flagged IPs wait; soft-locked
+        // IPs must also present the security code emailed to the admin.
+        $gate = fpLoginGate($ip, false);
+        if ($gate['mode'] === 'wait') {
+            $loginError = 'Too many failed attempts. ' . fpThrottleWaitText($gate['wait']);
+        } else {
+            $passOk = fpVerifyAdminPassword($_POST['fp_login_password'] ?? '', $password);
+            $otpOk  = ($gate['mode'] !== 'otp')
+                   || fpLoginOtpCheck($ip, trim((string)($_POST['fp_login_otp'] ?? '')));
+            if ($passOk && $otpOk) {
+                fpLoginRecordSuccess($ip);
+                // Cookie token is derived from the stored value ($password =
+                // the hash), so it persists across requests and
+                // auto-invalidates when the password (hash) changes.
+                fpSetAuthCookie($password, FP_COOKIE_TTL);
+                header('Location: ' . $_SERVER['REQUEST_URI']);
+                exit;
+            }
+            fpLoginRecordFailure($ip);
+            $loginError = ($gate['mode'] === 'otp')
+                ? 'Incorrect password or security code.'
+                : 'Incorrect password.';
         }
-        $loginError = 'Incorrect password.';
     }
 
     if (fpIsAuthenticated($password)) {
         fpSetAuthCookie($password, FP_COOKIE_TTL); // sliding renewal
         return;
     }
-    renderLoginWall($loginError);
+    // Rendering the wall is the one moment a soft-locked IP may trigger the
+    // (paced) security-code email — see fpLoginGate's $allowSend.
+    renderLoginWall($loginError, fpLoginGate($ip, true));
     exit;
 }
 
@@ -186,8 +204,12 @@ function requireAllowedIPAPI(): void {
     exit;
 }
 
-function renderLoginWall(?string $error): void {
+function renderLoginWall(?string $error, array $gate = ['mode' => 'open', 'wait' => 0, 'note' => '']): void {
     $p = $GLOBALS['FS_PREFIX'] ?? '';
+    $notice = $gate['note'];
+    if ($gate['mode'] === 'wait' && $notice === '') {
+        $notice = 'Too many failed attempts. ' . fpThrottleWaitText($gate['wait']);
+    }
     ?><!DOCTYPE html><html lang="en"><head>
     <link rel="icon" type="image/x-icon" href="<?= $p ?>menucounter/favicon.ico">
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -210,8 +232,13 @@ function renderLoginWall(?string $error): void {
       .btn-login{width:100%;background:var(--brown);color:#fff;border:none;border-radius:7px;
                  padding:11px;font-size:1rem;font-weight:700;cursor:pointer;}
       .btn-login:hover{background:#8B6420;}
+      input[type="text"]{width:100%;border:1px solid var(--border);border-radius:6px;
+                         padding:9px 12px;font-size:.95rem;margin-bottom:16px;background:#fafaf5;}
+      input[type="text"]:focus{outline:none;border-color:var(--green);}
       .error{background:#F8D7DA;border:1px solid #F1AEB5;color:#8B1A1A;border-radius:6px;
              padding:10px 14px;font-size:.85rem;margin-bottom:16px;}
+      .notice{background:#FFF3CD;border:1px solid #E6D9A8;color:#6B5B11;border-radius:6px;
+              padding:10px 14px;font-size:.85rem;margin-bottom:16px;}
       footer.host-credit{position:fixed;bottom:0;left:0;right:0;text-align:center;
              padding:14px 16px;font-size:.75rem;color:#999;}
       footer.host-credit a{color:var(--brown);text-decoration:none;font-weight:600;}
@@ -222,10 +249,18 @@ function renderLoginWall(?string $error): void {
       <?php if ($error): ?>
         <div class="error">⚠ <?= htmlspecialchars($error) ?></div>
       <?php endif; ?>
+      <?php if ($notice !== ''): ?>
+        <div class="notice">🔐 <?= htmlspecialchars($notice) ?></div>
+      <?php endif; ?>
       <form method="POST">
         <input type="hidden" name="fp_login_action" value="login">
         <label for="fp_login_password">Password</label>
         <input type="password" id="fp_login_password" name="fp_login_password" autofocus placeholder="Enter password">
+        <?php if ($gate['mode'] === 'otp'): ?>
+          <label for="fp_login_otp">Security Code</label>
+          <input type="text" id="fp_login_otp" name="fp_login_otp" inputmode="numeric"
+                 autocomplete="one-time-code" maxlength="6" placeholder="6-digit emailed code">
+        <?php endif; ?>
         <button type="submit" class="btn-login">Log In</button>
       </form>
     </div>

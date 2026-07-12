@@ -119,6 +119,15 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
   single cookie. The password is stored **one-way hashed** (`password_hash`) —
   even the running app can't recover it. Default password is `admin`; change it
   under **Settings** immediately.
+- **Login rate limiting** (`ratelimit.php`). Failed logins are throttled per
+  IP with progressive delays (10s after the 3rd failure, 30s after the 4th).
+  The 5th failure **soft-locks** the IP: a single-use 6-digit code is emailed
+  to the administrator (Settings → Administrator Email) and must be entered
+  alongside the password — no waiting once the code is in hand. If no admin
+  email is configured (or mail fails), an escalating 1 → 10 minute timeout
+  takes over instead. A successful login clears the record; 30 quiet minutes
+  do too. Codes expire in 15 minutes, die after 5 wrong tries, and re-sends
+  are paced so failed logins can't flood the administrator's inbox.
 - **Network gate.** Pages can be restricted to a single allowed IP (your
   pantry's public WiFi address) and to configurable weekly **allowed hours**.
   Both live in `auth.php`; leave the IP blank to allow all.

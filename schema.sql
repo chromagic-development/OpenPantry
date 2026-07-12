@@ -143,3 +143,17 @@ CREATE TABLE IF NOT EXISTS delivery_clients (
 
 CREATE INDEX IF NOT EXISTS idx_delivery_clients_rotation
     ON delivery_clients(enabled, delivered_at, sort_order);
+
+-- Per-IP progressive throttle for the admin login (see ratelimit.php, which
+-- also creates this on demand so the PantryPrep admin panel works before the
+-- FoodScan schema has run). Row '@' is a sentinel holding the last time ANY
+-- security-code email went out (global send pacing).
+CREATE TABLE IF NOT EXISTS login_throttle (
+    ip           TEXT PRIMARY KEY,             -- REMOTE_ADDR ('@' = global sentinel)
+    fails        INTEGER NOT NULL DEFAULT 0,   -- consecutive failures (30-min decay)
+    last_fail_at INTEGER NOT NULL DEFAULT 0,   -- unix seconds
+    otp_hash     TEXT    NOT NULL DEFAULT '',  -- password_hash of the emailed 6-digit code
+    otp_expires  INTEGER NOT NULL DEFAULT 0,   -- unix seconds
+    otp_tries    INTEGER NOT NULL DEFAULT 0,   -- wrong entries against this code
+    otp_sent_at  INTEGER NOT NULL DEFAULT 0    -- unix seconds (resend pacing)
+);
