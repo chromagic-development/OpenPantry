@@ -83,10 +83,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             setSetting('admin_email', implode(', ', $parts['valid']));
             $newPw     = trim($_POST['new_password']     ?? '');
             $confirmPw = trim($_POST['confirm_password'] ?? '');
+            $currentPw = trim($_POST['current_password'] ?? '');
             if ($newPw === '' && $confirmPw === '') {
                 $sysSaved = 'Administrator email saved.';
             } elseif ($newPw !== $confirmPw) {
                 $sysError = 'Passwords do not match.';
+            } elseif (!fpVerifyAdminPassword($currentPw, (string)(setting('admin_password', 'admin') ?? 'admin'))) {
+                // Rotating the shared admin password requires proving knowledge
+                // of the current one, so a walk-up at an unattended session (or
+                // a stolen auth cookie) can't silently change the password and
+                // lock everyone else out.
+                $sysError = 'The current password is incorrect. Your password was not changed.';
             } else {
                 // Store a one-way hash, never the plaintext. The session cookie
                 // token derives from the stored value (the hash), so set it from
@@ -456,8 +463,9 @@ renderNav('settings');
       Email box is ticked on the Order Report. The password is the shared login
       for PantryPrep admin and FoodScan; default is
       <code style="background:#EEE8D5;padding:2px 6px;border-radius:4px;">admin</code>
-      — change it after first setup. Leave both password boxes blank to save
-      only the email.
+      — change it after first setup. Leave the password boxes blank to save
+      only the email; to change it, enter your current password and the new
+      one twice.
     </p>
     <form method="post">
       <input type="hidden" name="fs_action" value="save_admin_password">
@@ -469,6 +477,11 @@ renderNav('settings');
         <p style="font-size:.75rem; color:#777; margin-top:4px;">
           Separate multiple recipients with a comma or semicolon — reminders go to all of them.
         </p>
+      </div>
+      <div style="margin-bottom:12px;">
+        <label for="current_password">Current Password</label>
+        <input type="password" id="current_password" name="current_password"
+               placeholder="Required only to change the password" oninput="checkPwMatch()">
       </div>
       <div style="margin-bottom:12px;">
         <label for="new_password">New Password</label>
@@ -755,16 +768,19 @@ renderNav('settings');
 </div>
 <script>
 function checkPwMatch() {
+  var cur = document.getElementById('current_password').value;
   var pw1 = document.getElementById('new_password').value;
   var pw2 = document.getElementById('confirm_password').value;
   var btn = document.getElementById('pwSubmitBtn');
   var msg = document.getElementById('pwMatchMsg');
   // Both blank → saving the email only (password unchanged): allow, no message.
   if (!pw1 && !pw2) { msg.textContent = ''; btn.disabled = false; return; }
-  if (pw1 === pw2) {
-    msg.textContent = '✅ Passwords match'; msg.style.color = '#276437'; btn.disabled = false;
-  } else {
+  if (pw1 !== pw2) {
     msg.textContent = '✗ Passwords do not match'; msg.style.color = '#8B1A1A'; btn.disabled = true;
+  } else if (!cur) {
+    msg.textContent = '🔑 Enter your current password to change it'; msg.style.color = '#8B1A1A'; btn.disabled = true;
+  } else {
+    msg.textContent = '✅ Passwords match'; msg.style.color = '#276437'; btn.disabled = false;
   }
 }
 
