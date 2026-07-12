@@ -375,6 +375,13 @@ if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
 
 <div class="toast" id="toast"></div>
 
+<footer style="text-align:center; padding:24px 16px; font-size:.78rem; color:#999; border-top:1px solid var(--border); margin-top:40px;">
+  &copy; 2026 <strong>Chromagic Development</strong> &mdash; OpenPantry, by
+  <strong>Bruce Alexander</strong>.
+  Released under the
+  <a href="../../LICENSE" style="color:var(--brown); text-decoration:none;">MIT License</a>.
+</footer>
+
 <script>
 let orders = [];
 let activeOrderId = null;
