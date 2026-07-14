@@ -157,6 +157,34 @@ renderNav('lookup');
   </div>
 
   <div class="card">
+    <h2>Add UPC Manually</h2>
+    <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
+      Use this for UPCs that Open Food Facts can't resolve. The mapping is
+      written to the cache below with source <code>manual</code> and used
+      for all future scans of this code.
+    </p>
+    <form method="post" class="row" style="margin-bottom:0;">
+      <input type="hidden" name="action" value="upc_add">
+      <div style="flex:1 1 160px;">
+        <label>UPC</label>
+        <input type="text" name="upc" required inputmode="numeric"
+               autocomplete="off" placeholder="e.g. 012345678905">
+      </div>
+      <div style="flex:2 1 240px;">
+        <label>Branded Name <span style="font-weight:400; color:#999;">(optional)</span></label>
+        <input type="text" name="brand_name" autocomplete="off"
+               placeholder="e.g. Bumble Bee Solid White Tuna">
+      </div>
+      <div style="flex:2 1 200px;">
+        <label>Generic Name</label>
+        <input type="text" name="generic_name" required autocomplete="off"
+               placeholder="e.g. Canned Tuna">
+      </div>
+      <div style="flex:0 0 100px;"><label>&nbsp;</label><button class="btn btn-primary btn-block">Add</button></div>
+    </form>
+  </div>
+
+  <div class="card">
     <h2>UPC → Generic Cache</h2>
     <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
       Populated automatically when a new UPC is scanned (Open Food Facts +
@@ -209,33 +237,6 @@ renderNav('lookup');
     </div>
   </div>
 
-  <div class="card">
-    <h2>Add UPC Manually</h2>
-    <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
-      Use this for UPCs that Open Food Facts can't resolve. The mapping is
-      written to the cache above with source <code>manual</code> and used
-      for all future scans of this code.
-    </p>
-    <form method="post" class="row" style="margin-bottom:0;">
-      <input type="hidden" name="action" value="upc_add">
-      <div style="flex:1 1 160px;">
-        <label>UPC</label>
-        <input type="text" name="upc" required inputmode="numeric"
-               autocomplete="off" placeholder="e.g. 012345678905">
-      </div>
-      <div style="flex:2 1 240px;">
-        <label>Branded Name <span style="font-weight:400; color:#999;">(optional)</span></label>
-        <input type="text" name="brand_name" autocomplete="off"
-               placeholder="e.g. Bumble Bee Solid White Tuna">
-      </div>
-      <div style="flex:2 1 200px;">
-        <label>Generic Name</label>
-        <input type="text" name="generic_name" required autocomplete="off"
-               placeholder="e.g. Canned Tuna">
-      </div>
-      <div style="flex:0 0 100px;"><label>&nbsp;</label><button class="btn btn-primary btn-block">Add</button></div>
-    </form>
-  </div>
 </div>
 <script>
 function filterLookup(inputId, tableId, countId) {
