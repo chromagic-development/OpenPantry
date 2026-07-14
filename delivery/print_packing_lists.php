@@ -62,7 +62,7 @@ function fmtAmount(array $s): string {
         $w = rtrim(rtrim(number_format((float)$s['weight_lbs'], 2, '.', ''), '0'), '.');
         return $w . ' lb';
     }
-    return (string)(int)$s['quantity'];
+    return (int)$s['quantity'] . ' each';
 }
 
 $today = date('M j, Y');

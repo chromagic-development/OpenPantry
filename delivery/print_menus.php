@@ -1,8 +1,11 @@
 <?php
 // Printable per-client delivery menus, one page per pending client in the
-// selected group. Each available item appears with a hand-markable checkbox;
+// selected group. Each available item appears with a hand-markable checkbox
+// and a parenthesized Qty / Weight — the amount this client's household
+// would receive, computed with the same rules the packing list uses;
 // completed sheets are later scanned and read back by vision AI (the
-// "CLIENT #N" badge in the top-right is the OCR-friendly identifier).
+// "CLIENT #N" badge in the top-right is the OCR-friendly identifier, and
+// process_upload.php's prompts tell the model to ignore the qty suffix).
 //
 // Filter: ?group=K-1|K-2|E-1|E-2|all  (default: all)
 // Scope:  enabled clients with delivered_at IS NULL — i.e. clients that
@@ -65,13 +68,32 @@ foreach ($catOrder as $cat) {
                  && empty($it['use_adults']);
         if (!empty($it['has_detail'])) {
             foreach ($it['sizes'] as $sz) {
-                $rows[$cat][] = ['name' => $it['name'] . ' ' . $sz, 'kids_only' => $kidsOnly];
+                $rows[$cat][] = ['name' => $it['name'] . ' ' . $sz, 'kids_only' => $kidsOnly, 'item' => $it];
             }
         } else {
-            $rows[$cat][] = ['name' => $it['name'], 'kids_only' => $kidsOnly];
+            $rows[$cat][] = ['name' => $it['name'], 'kids_only' => $kidsOnly, 'item' => $it];
         }
     }
 }
+
+// The amount this client would receive for an item, printed in parentheses
+// after the item name. Mirrors the household clamps + familySize formula in
+// persistDeliveryOrder() and the Qty / Weight formatting in
+// print_packing_lists.php (fmtAmount), so the order form and the packing
+// list always show the same numbers.
+function fmtPlannedAmount(array $item, int $adults, int $children): string {
+    $adults   = max(1, $adults);
+    $children = max(0, $children);
+    $familySize = min($adults + ($children / 2), 5);
+    if ($familySize < 1) $familySize = 1;
+    $qd = deliveryItemQuantity($item, $adults, $children, $familySize);
+    if (!empty($qd['by_weight'])) {
+        $w = rtrim(rtrim(number_format((float)$qd['weight_lbs'], 2, '.', ''), '0'), '.');
+        return $w . ' lb';
+    }
+    return (int)$qd['quantity'] . ' each';
+}
+
 $today = date('M j, Y');
 ?>
 <!doctype html>
@@ -119,6 +141,8 @@ $today = date('M j, Y');
     gap: 4px 14px; font-size: 10.5pt;
   }
   .item { display: flex; align-items: center; gap: 8px; line-height: 1.6; }
+  .item .qty { font-weight: 700; white-space: nowrap; }
+  .qty-note { margin-top: 16px; font-weight: 700; font-size: 10.5pt; }
   .cb {
     display: inline-block; width: 14px; height: 14px; flex: 0 0 14px;
     border: 1.5px solid #000; border-radius: 2px; background: #fff;
@@ -169,7 +193,9 @@ $today = date('M j, Y');
         // Per-client visibility pass: a client with no children doesn't see
         // kids-only items (e.g. kids snacks, diapers). Build a filtered view
         // here so empty categories disappear cleanly too.
-        $hasKids = (int)$c['children'] > 0;
+        $hasKids  = (int)$c['children'] > 0;
+        $adults   = (int)$c['adults'];
+        $children = (int)$c['children'];
         $visibleRows = [];
         foreach ($rows as $cat => $items) {
             $kept = [];
@@ -190,12 +216,16 @@ $today = date('M j, Y');
               <?php foreach ($items as $r): ?>
                 <div class="item">
                   <span class="cb" aria-hidden="true"></span>
-                  <span><?= htmlspecialchars($r['name']) ?></span>
+                  <span><?= htmlspecialchars($r['name']) ?>
+                    <span class="qty">(<?= htmlspecialchars(fmtPlannedAmount($r['item'], $adults, $children)) ?>)</span></span>
                 </div>
               <?php endforeach; ?>
             </div>
           </div>
         <?php endforeach; ?>
+        <div class="qty-note">
+          Please write any specific Qty / Weight requests by a client next to the item defaults.
+        </div>
       <?php endif; ?>
     </div>
   <?php endforeach; ?>
