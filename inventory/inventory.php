@@ -45,12 +45,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $clr->execute([now()]);
         $produceCleared = true;
     } else {
-        $counts     = $_POST['count'] ?? [];
-        $units      = $_POST['unit']  ?? [];
-        $caseCounts = $_POST['case_count'] ?? [];
-        // Deliverable: unchecked boxes don't submit at all, so default every
-        // master-list name to 0 and flip the ones the browser DID submit.
-        $deliverablePost = $_POST['deliverable'] ?? [];
+        // Normalize the submission into one $rows list. Primary path: a single
+        // JSON blob serialized by JS at submit time. This exists because PHP's
+        // max_input_vars (1000 on typical shared hosting) silently DROPS every
+        // POST variable past the first 1000 — with 350+ items × 3-4 fields per
+        // row, every item alphabetically past the cutoff was never saved at
+        // all. One JSON field sidesteps the limit entirely.
+        $rows = [];
+        $json = (string)($_POST['rows_json'] ?? '');
+        if ($json !== '') {
+            foreach ((array)json_decode($json, true) as $r) {
+                if (!is_array($r) || !isset($r['name'])) continue;
+                $rows[] = [
+                    'name'  => (string)$r['name'],
+                    'count' => (string)($r['count'] ?? ''),
+                    'unit'  => (string)($r['unit'] ?? ''),
+                    // null = field absent (never true on the JS path, which
+                    // always sends the case value, possibly '').
+                    'case'  => array_key_exists('case', $r) ? (string)$r['case'] : null,
+                    'del'   => !empty($r['del']),
+                ];
+            }
+        } else {
+            // No-JS fallback: per-field arrays keyed by numeric row index with
+            // the generic name as a hidden field *value* (values round-trip
+            // intact even for names with brackets or odd characters). Still
+            // subject to max_input_vars truncation on very large item lists.
+            $postNames  = $_POST['name']       ?? [];
+            $counts     = $_POST['count']      ?? [];
+            $units      = $_POST['unit']       ?? [];
+            $caseCounts = $_POST['case_count'] ?? [];
+            // Deliverable: unchecked boxes don't submit at all, so default
+            // every submitted row to 0 and flip the ones the browser DID send.
+            $deliverablePost = $_POST['deliverable'] ?? [];
+            foreach ($postNames as $i => $name) {
+                $rows[] = [
+                    'name'  => (string)$name,
+                    'count' => (string)($counts[$i] ?? ''),
+                    'unit'  => (string)($units[$i] ?? ''),
+                    'case'  => array_key_exists($i, $caseCounts) ? (string)$caseCounts[$i] : null,
+                    'del'   => isset($deliverablePost[$i]),
+                ];
+            }
+        }
         $upd = $db->prepare(
             "INSERT INTO inventory (generic_name, count, unit, updated_at)
              VALUES (?, ?, ?, ?)
@@ -77,23 +114,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // lookup table stale. The UPDATE is a harmless no-op for non-produce names.
         $updProduce = $db->prepare("UPDATE produce_lookup SET unit = ? WHERE generic_name = ?");
 
-        foreach ($names as $name => $defaultUnit) {
-            $u   = (($units[$name] ?? $defaultUnit) === 'lb') ? 'lb' : 'each';
-            $del = isset($deliverablePost[$name]) ? 1 : 0;
+        foreach ($rows as $r) {
+            $name = $r['name'];
+            // Only accept names that are in the server-built master list, so a
+            // crafted POST can't write arbitrary inventory rows.
+            if (!isset($names[$name])) continue;
+            $u   = ($r['unit'] === 'lb' || $r['unit'] === 'each')
+                 ? $r['unit']
+                 : (($names[$name] === 'lb') ? 'lb' : 'each');
+            $del = $r['del'] ? 1 : 0;
             $updProduce->execute([$u, $name]);
             // Always persist deliverable (independent of count).
             $updDel->execute([$name, $u, now(), $del]);
-            // Persist Count/Case for every submitted row. An emptied field
-            // maps back to 0 ("not set") so a stale case size can be cleared.
-            if (array_key_exists($name, $caseCounts)) {
-                $cv  = (string)$caseCounts[$name];
+            // Persist Count/Case whenever the field was submitted. An emptied
+            // field maps back to 0 ("not set") so a stale case size can be cleared.
+            if ($r['case'] !== null) {
+                $cv  = $r['case'];
                 $cpc = (is_numeric($cv) && (float)$cv > 0) ? (float)$cv : 0.0;
                 $updCase->execute([$name, $u, now(), $cpc]);
             }
             // Persist count + unit only if the user actually entered a value.
-            $val = $counts[$name] ?? '';
-            if ($val === '' || $val === null) continue;
-            $upd->execute([$name, (float)$val, $u, now()]);
+            if ($r['count'] === '') continue;
+            $upd->execute([$name, (float)$r['count'], $u, now()]);
         }
         $saved = true;
     }
@@ -161,11 +203,14 @@ renderNav('inventory');
       <button type="submit" form="invForm" class="btn btn-primary">Save All</button>
     </div>
     <form method="post" id="invForm">
+      <!-- Filled by JS on submit with the whole table as one JSON blob so the
+           POST stays at ~1 variable instead of 4 per row (max_input_vars). -->
+      <input type="hidden" name="rows_json" id="rowsJson" value="">
       <div class="inv-table-wrap">
       <table class="data" id="invTable">
         <thead><tr>
           <th>Generic Name</th>
-          <th title="Show this item on the PantryPrep counter order form">Deliverable</th>
+          <th title="Show this item on the client delivery menu (does not affect the PantryPrep counter form)">Deliverable</th>
           <th class="num">Current Count</th>
           <th>Unit</th>
           <th class="num" title="How many units one supplier case holds — used for the Case Request column on the Order Report">Count/Case</th>
@@ -173,7 +218,7 @@ renderNav('inventory');
           <th>Last Updated</th>
         </tr></thead>
         <tbody>
-        <?php foreach ($names as $name => $defaultUnit):
+        <?php $i = 0; foreach ($names as $name => $defaultUnit): $i++;
             $row = $inv[$name] ?? null;
             $count = $row['count'] ?? '';
             $unit  = $row['unit']  ?? $defaultUnit;
@@ -185,8 +230,8 @@ renderNav('inventory');
                 $count = rtrim(rtrim(number_format((float)$count, 2, '.', ''), '0'), '.');
             }
             $isEach = ($unit === 'each');
-            // Default new rows to deliverable=1 (show on menucounter). Only
-            // persisted 0 values flip the checkbox off.
+            // Default new rows to deliverable=1 (show on the delivery menu).
+            // Only persisted 0 values flip the checkbox off.
             $deliverable = ($row === null) ? 1 : (int)($row['deliverable'] ?? 1);
             // Count/Case: 0 = unset → blank field. Trim trailing zeros for display.
             $cpc = (float)($row['count_per_case'] ?? 0);
@@ -195,10 +240,12 @@ renderNav('inventory');
                 : '';
         ?>
           <tr data-name="<?= htmlspecialchars(strtolower($name)) ?>" data-kind="<?= htmlspecialchars($kinds[$name] ?? 'packaged') ?>">
-            <td><?= htmlspecialchars($name) ?></td>
+            <td>
+              <input type="hidden" name="name[<?= $i ?>]" value="<?= htmlspecialchars($name) ?>">
+              <?= htmlspecialchars($name) ?></td>
             <td style="text-align:center;">
               <input type="checkbox"
-                     name="deliverable[<?= htmlspecialchars($name) ?>]"
+                     name="deliverable[<?= $i ?>]"
                      value="1"<?= $deliverable === 1 ? ' checked' : '' ?>
                      style="width:20px; height:20px; cursor:pointer;">
             </td>
@@ -210,14 +257,14 @@ renderNav('inventory');
                        step="<?= $isEach ? '1' : '0.01' ?>"
                        min="0"
                        class="inv-count-input"
-                       name="count[<?= htmlspecialchars($name) ?>]"
+                       name="count[<?= $i ?>]"
                        value="<?= htmlspecialchars((string)$count) ?>">
                 <button type="button" class="inv-btn inv-btn-inc"
                         aria-label="Increment" onclick="bumpCount(this, 1)">+</button>
               </div>
             </td>
             <td>
-              <select name="unit[<?= htmlspecialchars($name) ?>]" style="width:90px;"
+              <select name="unit[<?= $i ?>]" style="width:90px;"
                       onchange="syncStep(this)">
                 <option value="each" <?= $unit==='each'?'selected':'' ?>>each</option>
                 <option value="lb"   <?= $unit==='lb'  ?'selected':'' ?>>lb</option>
@@ -225,7 +272,7 @@ renderNav('inventory');
             </td>
             <td class="num">
               <input type="number" step="any" min="0" placeholder="—"
-                     name="case_count[<?= htmlspecialchars($name) ?>]"
+                     name="case_count[<?= $i ?>]"
                      value="<?= htmlspecialchars($cpcDisplay) ?>"
                      style="width:80px; text-align:right;">
             </td>
@@ -296,6 +343,36 @@ function syncStep(sel) {
     input.step = '0.01';
   }
 }
+
+// Serialize every row into ONE hidden JSON field at submit time, then disable
+// the per-field inputs so they are excluded from the POST. Without this the
+// submission has 3-4 variables per item and PHP's max_input_vars (1000 on
+// most shared hosts) silently drops every row past the first ~250-330 items —
+// items late in the alphabet were never saved.
+var invForm = document.getElementById('invForm');
+if (invForm) invForm.addEventListener('submit', function() {
+  var rows = document.querySelectorAll('#invTable tbody tr');
+  var data = [];
+  rows.forEach(function(tr) {
+    var nameInput = tr.querySelector('input[type=hidden][name^="name["]');
+    if (!nameInput) return;
+    var cnt     = tr.querySelector('.inv-count-input');
+    var unitSel = tr.querySelector('select[name^="unit["]');
+    var caseIn  = tr.querySelector('input[name^="case_count["]');
+    var delCb   = tr.querySelector('input[type=checkbox][name^="deliverable["]');
+    data.push({
+      name:   nameInput.value,
+      count:  cnt ? cnt.value : '',
+      unit:   unitSel ? unitSel.value : '',
+      'case': caseIn ? caseIn.value : '',
+      del:    !!(delCb && delCb.checked)
+    });
+  });
+  document.getElementById('rowsJson').value = JSON.stringify(data);
+  // Disabled controls don't submit; keeps the POST tiny. The page reloads on
+  // response, so leaving them disabled for the request's duration is fine.
+  this.querySelectorAll('#invTable [name]').forEach(function(el) { el.disabled = true; });
+});
 
 function applyInvFilter() {
   var q    = (document.getElementById('invSearch').value || '').toLowerCase().trim();
