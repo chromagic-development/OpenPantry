@@ -548,9 +548,14 @@ async function tryAcceptName(q) {
     await acceptNameMatch(0);
     return;
   }
+  if (!nameTotal) {
+    // Dead end — flash('error') buzzes and clears the field, so the next
+    // scan starts clean instead of appending to the failed query.
+    flash('No lookup names match "' + q + '".', 'error');
+    return;
+  }
   renderNameMatches();
-  flash(nameTotal ? nameTotal + ' names match — keep typing to narrow to one.'
-                  : 'No lookup names match "' + q + '".', 'info');
+  flash(nameTotal + ' names match — keep typing to narrow to one.', 'info');
 }
 
 async function acceptNameMatch(i) {
@@ -958,6 +963,14 @@ function bumpStats(it, scanCount) {
 }
 function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function flash(msg, kind) {
+  // Every error banner also buzzes and empties the barcode field. An operator
+  // who misses the banner otherwise keeps scanning into the leftover text —
+  // each burst appends to it, so every following scan is rejected too.
+  if (kind === 'error') {
+    errorBeep();
+    barcodeInput.value = '';
+    hideNameMatches();
+  }
   const b = document.createElement('div');
   b.className = 'banner ' + (kind || 'info');
   b.textContent = msg;
