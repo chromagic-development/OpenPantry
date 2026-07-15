@@ -19,29 +19,12 @@ if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
     fpRenderAccessDenied('Access is closed right now. Please try again during the permitted hours.');
 }
 
+// The admin "On" checkbox (config_items.active) is the ONLY visibility switch
+// for this form. The Inventory page's Deliverable flag governs the delivery
+// menu alone (delivery/db.php buildDeliveryItems) and must not filter here —
+// the two menus are curated independently.
 $stmt = $db->query("SELECT * FROM config_items WHERE active = 1 ORDER BY category, sort_order, id");
 $allItems = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-// PantryPrep visibility gate: any inventory row in openpantry.db that's been
-// marked NOT deliverable (checkbox unchecked on the Inventory page) is
-// suppressed here. Case-insensitive match on item_name <-> generic_name.
-// If openpantry.db isn't reachable or the column is missing, fail open and
-// show every item (current behavior).
-$nondeliverable = [];
-try {
-    $fsDb = new PDO('sqlite:' . fsDbPath('openpantry.db'));
-    $fsDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    foreach ($fsDb->query("SELECT generic_name FROM inventory WHERE deliverable = 0") as $r) {
-        $nondeliverable[strtolower($r['generic_name'])] = true;
-    }
-} catch (\Throwable $e) {
-    // Leave $nondeliverable empty -> nothing gets filtered.
-}
-if (!empty($nondeliverable)) {
-    $allItems = array_values(array_filter($allItems, function ($it) use ($nondeliverable) {
-        return !isset($nondeliverable[strtolower($it['item_name'])]);
-    }));
-}
 
 $categories = [];
 foreach ($allItems as $item) {

@@ -167,7 +167,8 @@ function buildDeliveryItems(PDO $foodscanDb, ?PDO $picklistDb): array {
             // NOTE: we deliberately do NOT filter by `active = 1` here. The
             // PantryPrep counter form already filters by active itself, so
             // admins can use it to hide items from the in-pantry order page
-            // (alongside the foodscan inventory.deliverable flag), but the
+            // (`active` governs ONLY that form, just as inventory.deliverable
+            // governs only this delivery menu), but the
             // delivery side still needs the config row's `has_factor` /
             // family_factor metadata so persistDeliveryOrder() can compute
             // the correct each/lb quantities for packing lists — even when

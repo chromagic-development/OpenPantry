@@ -433,9 +433,10 @@ E.append(bullet("<b>Deduplicate</b> — merge duplicate item rows that "
 E.append(bullet("<b>Reports</b> — item-usage reports with a chart; "
                 "shoppers are anonymized as “Client N.”"))
 E.append(bullet("The Menu Counter shares the same login, allowed-IP, and "
-                "allowed-hours gate as the rest of OpenPantry, and it hides "
-                "any item you've marked non-deliverable on the Inventory "
-                "page."))
+                "allowed-hours gate as the rest of OpenPantry. Its order form "
+                "shows exactly the items toggled <b>On</b> in Item admin — "
+                "the Inventory page's Deliverable checkbox only affects the "
+                "delivery menu, not the Menu Counter."))
 
 E.append(kicker("HOME DELIVERIES"))
 E += h1("Delivery paperwork &amp; the AI upload")
