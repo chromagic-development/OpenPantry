@@ -142,7 +142,7 @@ $today = date('M j, Y');
   }
   .item { display: flex; align-items: center; gap: 8px; line-height: 1.6; }
   .item .qty { font-weight: 700; white-space: nowrap; }
-  .qty-note { margin-top: 16px; font-weight: 700; font-size: 10.5pt; }
+  .client-info .qty-note { font-weight: 700; }
   .cb {
     display: inline-block; width: 14px; height: 14px; flex: 0 0 14px;
     border: 1.5px solid #000; border-radius: 2px; background: #fff;
@@ -187,6 +187,9 @@ $today = date('M j, Y');
           <?= (int)$c['adults'] ?> adult<?= (int)$c['adults'] === 1 ? '' : 's' ?>,
           <?= (int)$c['children'] ?> child<?= (int)$c['children'] === 1 ? '' : 'ren' ?>
         </div>
+        <div class="qty-note">
+          Fill selections completely with black marker. Please write any specific Qty/Weight requests by a client next to the item defaults.
+        </div>
       </div>
 
       <?php
@@ -223,9 +226,6 @@ $today = date('M j, Y');
             </div>
           </div>
         <?php endforeach; ?>
-        <div class="qty-note">
-          Please write any specific Qty / Weight requests by a client next to the item defaults.
-        </div>
       <?php endif; ?>
     </div>
   <?php endforeach; ?>
