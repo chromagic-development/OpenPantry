@@ -278,8 +278,8 @@ first scan the mapping is local-only.
   OMR.
 - Furthermore, the prediction algorithm for restocking to optimize food
   availability could be considered a rudimentary form of ML by implementing a
-  Poisson GLM where the linear model achieves a better fit as it "learns" with
-  more data.
+  Poisson GLM where the linear model achieves better predictions as it refits
+  with more data.
 
  Explore AI for Humanity at https://lnkd.in/gGWa93UM to learn more about how 
  AI initiatives can make positive contributions to non-profits.
