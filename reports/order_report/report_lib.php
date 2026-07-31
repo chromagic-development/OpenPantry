@@ -21,6 +21,77 @@ const OP_HIST_DAYS = 1100;
 // alert re-triggered within this window so a frequent cron doesn't spam.
 const OP_ALERT_EMAIL_MIN_HOURS = 20;
 
+// Days the pantry operated but nothing was scanned, as a ['Y-m-d' => true] set
+// (see the unscanned_days table in schema.sql). The demand model treats these
+// as unobserved rather than as zero demand, so a missed scanning day no longer
+// biases par levels and reorder alerts low.
+//
+// Cached per request — both the report page and the cron mailer call this once
+// per run. Defensive for the same reason op_ensure_alert_email_column() is: on
+// a partially-deployed install schema.sql may predate this file and the table
+// won't exist yet. Missing table = no unscanned days = the original behaviour,
+// which is the right way to fail here.
+function op_unscanned_days(PDO $db): array {
+    static $cache = null;
+    if ($cache !== null) return $cache;
+    $cache = [];
+    try {
+        foreach ($db->query("SELECT day FROM unscanned_days") as $r) {
+            $cache[(string)$r['day']] = true;
+        }
+    } catch (\Throwable $e) {
+        // Table missing / DB unavailable — every day counts as observed.
+    }
+    return $cache;
+}
+
+// Which days of the week the pantry actually distributes on, as a [0..6 => true]
+// set (0 = Sunday, matching date('w')). Derived from the scan history itself
+// rather than configured: a day-of-week that has never once carried a scan is a
+// day the pantry is closed.
+//
+// Why this matters for the trailing-average method: its sigma is the stdev of
+// *daily* demand, and a closed Saturday contributes a zero that looks exactly
+// like a quiet Saturday. Those structural zeros are schedule, not demand
+// volatility, and they inflate sigma — and therefore safety stock — badly. On a
+// Mon-Fri schedule the inflation runs ~1.4x on thin items and over 5x on steady
+// high-volume produce, which is where the padding costs the most.
+//
+// Deliberately evidence-gated: with less than two weeks of history a day-of-week
+// simply may not have come around yet, and calling it closed would be guessing.
+// In that case (and for a genuinely 7-day pantry) every day is returned open,
+// which reproduces the original behaviour exactly.
+//
+//   $hist : ['generic_name' => ['Y-m-d' => amount, …], …] as loaded below.
+function op_open_dow(array $hist): array {
+    $allOpen = [];
+    for ($w = 0; $w < 7; $w++) $allOpen[$w] = true;
+
+    // Union of every day any item was scanned on.
+    $days = [];
+    foreach ($hist as $byDay) {
+        foreach ($byDay as $d => $_) $days[$d] = true;
+    }
+    if (count($days) < 10) return $allOpen;
+
+    $keys = array_keys($days);
+    sort($keys);
+    $first = DateTimeImmutable::createFromFormat('Y-m-d', (string)$keys[0]);
+    $last  = DateTimeImmutable::createFromFormat('Y-m-d', (string)end($keys));
+    // Under 14 days of span, some weekday has had at most one chance to appear.
+    if ($first === false || $last === false || (int)$first->diff($last)->days < 14) {
+        return $allOpen;
+    }
+
+    $open = [];
+    foreach ($keys as $d) {
+        $dt = DateTimeImmutable::createFromFormat('Y-m-d', (string)$d);
+        if ($dt !== false) $open[(int)$dt->format('w')] = true;
+    }
+    // A single open day-of-week is more likely a data artefact than a schedule.
+    return count($open) >= 2 ? $open : $allOpen;
+}
+
 // Build the sorted, filtered Order-Report rows.
 //
 // $opts keys (all optional, sensible defaults from Settings):
@@ -32,13 +103,22 @@ const OP_ALERT_EMAIL_MIN_HOURS = 20;
 function op_report_rows(PDO $db, array $opts = []): array {
     $leadTime      = max(1, (int)($opts['lead_time']       ?? (int)setting('default_lead_time', '14')));
     $velWindow     = max(7, (int)($opts['velocity_window']  ?? (int)setting('velocity_window', '30')));
-    $z             = (float)($opts['z']                     ?? (float)setting('safety_z', '1.65'));
+    // Clamped like the two above. A stored non-numeric safety_z casts to 0.0 and
+    // silently removes all safety stock; a negative one would put par levels
+    // *below* the bare forecast, under-ordering exactly where the buffer matters.
+    // 4.0 (~99.997% one-sided) is already well past any useful service level.
+    $z             = max(0.0, min(4.0, (float)($opts['z']    ?? (float)setting('safety_z', '1.65'))));
     $ignoreStock   = (bool)($opts['ignore_stock']           ?? false);
     $ignoreEvents  = (bool)($opts['ignore_events']          ?? true);
     $produceOnly   = (bool)($opts['produce_only']           ?? false);
     $purchasedOnly = (bool)($opts['purchased_only']         ?? false);
 
     $today = new DateTimeImmutable('today');
+
+    // Days with no scanning coverage. Excluded from the demand estimate's
+    // exposure below (and inside the GLM fit) instead of being read as days of
+    // genuine zero demand.
+    $unscanned = op_unscanned_days($db);
 
     // Per-item daily demand history (full window feeds the GLM; its last
     // velocity_window days feed the trailing-average fallback).
@@ -74,22 +154,67 @@ function op_report_rows(PDO $db, array $opts = []): array {
         $produceNamesLc[strtolower($r['generic_name'])] = true;
     }
 
+    // Distribution schedule, inferred once for the whole report (see
+    // op_open_dow). Open days in the lead-time horizon are what demand actually
+    // varies over; closed ones contribute neither demand nor uncertainty.
+    $openDow = op_open_dow($hist);
+    $openInLT = 0;
+    for ($i = 1; $i <= $leadTime; $i++) {
+        if (isset($openDow[(int)$today->modify("+{$i} days")->format('w')])) $openInLT++;
+    }
+
     $rows = [];
     foreach ($hist as $name => $days) {
+        // Trailing window, 0-filled. An unscanned day is left out of the sample
+        // entirely so the denominator shrinks with it — a 6-of-7 average rather
+        // than a 7-day one diluted by a zero we never actually observed.
+        //
+        // Two samples are accumulated from the same window. $vals spans every
+        // observed calendar day and yields ADV, a per-calendar-day rate: that is
+        // what the lead-time forecast and days_left are denominated in, so it
+        // must keep counting closed days as the genuine zeros they are.
+        // $openVals keeps only days the pantry distributes on, and drives the
+        // spread — a closed Sunday is schedule, not demand noise, and letting it
+        // widen sigma is what inflates safety stock.
         $vals = [];
+        $openVals = [];
         for ($i = 0; $i < $velWindow; $i++) {
-            $d = $today->modify("-{$i} days")->format('Y-m-d');
-            $vals[] = $days[$d] ?? 0.0;
+            $day = $today->modify("-{$i} days");
+            $d = $day->format('Y-m-d');
+            if (isset($unscanned[$d])) continue;
+            $v = $days[$d] ?? 0.0;
+            $vals[] = $v;
+            if (isset($openDow[(int)$day->format('w')])) $openVals[] = $v;
         }
-        $n   = count($vals);
-        $adv = array_sum($vals) / $n;
-        $var = 0.0;
-        foreach ($vals as $v) $var += ($v - $adv) * ($v - $adv);
-        $sigma = sqrt($var / $n);
+        $n = count($vals);
+        if ($n > 0) {
+            $adv = array_sum($vals) / $n;
+        } else {
+            // Every day in the window was unscanned — no demand signal at all,
+            // so don't invent one (and don't divide by zero).
+            $adv = 0.0;
+        }
+
+        // Sigma over open days only, then re-expressed as the per-calendar-day
+        // figure that reproduces the same buffer under the report's documented
+        // Safety = Z·σ·√LT identity, so the ADV and σ columns stay in the same
+        // units and order_report.php's header maths still reads true:
+        //     Z·σ_open·√openInLT  ==  Z·(σ_open·√(openInLT/LT))·√LT
+        $nOpen = count($openVals);
+        if ($nOpen > 0 && $openInLT > 0) {
+            $advOpen = array_sum($openVals) / $nOpen;
+            $varOpen = 0.0;
+            foreach ($openVals as $v) $varOpen += ($v - $advOpen) * ($v - $advOpen);
+            $sigmaOpen = sqrt($varOpen / $nOpen);
+            $sigma = $sigmaOpen * sqrt($openInLT / $leadTime);
+        } else {
+            $sigma = 0.0;
+        }
 
         $fc = null;
         try {
-            $fc = op_forecast_item_cached($db, $name, $days, $today, $leadTime, $z, $ignoreEvents);
+            $fc = op_forecast_item_cached($db, $name, $days, $today, $leadTime, $z,
+                                          $ignoreEvents, $unscanned);
         } catch (\Throwable $e) {
             $fc = null;
         }

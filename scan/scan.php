@@ -7,6 +7,24 @@ require_once __DIR__ . '/../common.php';
 require_once __DIR__ . '/../auth.php';
 requireAllowedIP();
 $order = currentOpenOrder();
+// The scan table is rendered client-side, so a mid-order refresh would
+// otherwise show an empty list with no ✕ buttons — leaving the operator no way
+// to remove a mistake short of ending the order. Ship the open order's existing
+// scans to the client and let appendRow() hydrate them on load.
+$bootScans = [];
+if ($order) {
+  $st = getDB()->prepare(
+    "SELECT id, barcode, generic_name, kind, quantity, weight_lbs, scanned_at
+       FROM scans WHERE order_id = ? ORDER BY id ASC"
+  );
+  $st->execute([$order['id']]);
+  foreach ($st->fetchAll() as $r) {
+    // Format the time server-side: scanned_at is stored as 'Y-m-d H:i:s',
+    // which JS Date parsing handles inconsistently across engines.
+    $r['time_label'] = date('g:i:s A', strtotime($r['scanned_at']));
+    $bootScans[] = $r;
+  }
+}
 // Tare (ounces) subtracted from each entered produce weight; converted to lb
 // for the client-side weight math.
 $tareLbs = (float)(setting('tare_oz', '0') ?? 0) / 16.0;
@@ -24,7 +42,9 @@ if (!$order) {
 renderHead('Scan');
 // Menu/subnav intentionally omitted — the scan station is a focused kiosk flow.
 ?>
-<div class="container">
+<div class="container scan-page">
+ <div class="scan-layout">
+  <div class="scan-col">
   <div id="orderBar" class="card" style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
     <div style="flex:1 1 200px;">
       <div style="font-size:.75rem; text-transform:uppercase; color:#777;">Current Order</div>
@@ -44,14 +64,12 @@ renderHead('Scan');
 
   <div class="card" id="scanCard">
     <h2>Scan Barcode</h2>
+    <!-- One line only: the longer explanation cost ~110px of the left column
+         every load, and the placeholder below already says the field takes a
+         typed name as well as a barcode. -->
     <div class="banner info" id="scannerHint">
-      <div style="font-size:1.4rem;">📷</div>
-      <div>
-        <strong>Scanner ready:</strong> point at a barcode and pull the trigger.
-        The field below shows what the scanner is typing. Tap the field if the
-        cursor leaves it. No barcode? Type the item's <em>name</em> instead —
-        matches from the lookup tables appear as you type.
-      </div>
+      <span style="font-size:1.2rem;">📷</span>
+      <div><strong>Scanner ready</strong> — point at a barcode and pull the trigger.</div>
     </div>
     <label for="barcodeInput">Barcode or Item Name</label>
     <input type="text" id="barcodeInput" autocomplete="off" autocapitalize="off"
@@ -70,6 +88,30 @@ renderHead('Scan');
     </div>
 
   </div>
+  </div><!-- /.scan-col -->
+
+  <!-- Right pane: the live order. Height-capped so the table scrolls inside
+       itself and the newest row (with its ✕) is always on screen. -->
+  <div class="card" id="thisOrderCard">
+    <div class="order-head">
+      <h2 style="margin:0;">This Order</h2>
+      <button id="btnRecipe" class="btn btn-secondary" <?= $order ? '' : 'disabled' ?>>🍲 Suggest Recipe</button>
+    </div>
+    <div class="stat-grid" style="margin-bottom:12px;">
+      <div class="stat"><div class="v" id="statCount">0</div><div class="k">Items Scanned</div></div>
+      <div class="stat"><div class="v" id="statUnique">0</div><div class="k">Unique Generics</div></div>
+      <div class="stat"><div class="v" id="statWeight">0.0</div><div class="k">Produce lbs</div></div>
+    </div>
+    <div id="scanTableWrap">
+      <table class="data" id="scanTable">
+        <thead><tr>
+          <th>Time</th><th>Generic</th><th>Kind</th><th class="num">Qty</th><th class="num">Lbs</th><th>Barcode</th><th class="col-x"></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+ </div><!-- /.scan-layout -->
 
   <!-- ── Unknown-UPC name-entry modal (blocks until save or cancel) ── -->
   <div id="namePrompt" class="wt-overlay" style="display:none;" aria-hidden="true">
@@ -206,40 +248,97 @@ renderHead('Scan');
     .nm-hint { padding: 8px 14px; font-size: .75rem; color: #777;
                background: #fafaf5; border-top: 1px solid var(--border); }
     .nm-hint:first-child { border-top: none; }
+
+    /* ── Scan-table rows ── */
+    /* Generic-name links open AI prep tips; dotted underline + help cursor
+       so they read as "more info" rather than navigation. */
+    .prep-link { color: var(--brown); font-weight: 600;
+                 text-decoration: underline dotted; text-underline-offset: 3px;
+                 cursor: help; }
+    .prep-link:hover { color: var(--green); }
+    /* Wide on purpose: removing a mis-scan is the one corrective action on this
+       page, so it gets a target that's hard to miss in a hurry. The column
+       width is set in CSS (.col-x) rather than inline so it tracks the
+       narrower short-screen size below. */
+    .btn-x { background: var(--red); color: #fff; border: none;
+             border-radius: 8px; width: 132px; height: 44px;
+             font-size: 1.3rem; font-weight: 800; cursor: pointer;
+             line-height: 1; padding: 0; }
+    #scanTable th.col-x { width: 148px; }
+    .btn-x:hover { filter: brightness(1.1); }
+    .btn-x:active { transform: scale(.96); }
+    .btn-x:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* ── Two-column kiosk layout ──────────────────────────────────────────
+       The scan station is data-dense and runs on a wide laptop screen, so it
+       overrides the shared 980px .container. Scan controls sit on the left,
+       the live order list on the right in its own scroll pane — the operator
+       never has to scroll the page to reach a row's ✕ button. */
+    .container.scan-page { max-width: 1400px; margin: 14px auto 0; }
+
+    /* 42% keeps the End/Cancel buttons on one line with the order number at
+       1366px — at 38% they wrapped and cost the left column ~70px of height. */
+    .scan-layout {
+      display: grid;
+      grid-template-columns: minmax(420px, 42%) 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    /* The modals are position:fixed and the <style> block is display:none, so
+       neither becomes a grid item — only .scan-col and #thisOrderCard do. */
+    .scan-col > .card:last-child { margin-bottom: 0; }
+
+    /* Height-capped so the table scrolls inside itself instead of pushing the
+       page down. 210 = site header (87) + container margin (14) + footer
+       (40 margin + 63) + slack. Measured at 1920×955. */
+    #thisOrderCard {
+      display: flex; flex-direction: column;
+      max-height: calc(100vh - 210px);
+      margin-bottom: 0;
+    }
+    .order-head { display: flex; align-items: center; justify-content: space-between;
+                  gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    #scanTableWrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+    /* Pinned header row — the table body scrolls under it. */
+    #scanTable thead th { position: sticky; top: 0; z-index: 2; }
+
+    /* 1366×768 and other short laptop screens: reclaim vertical space so more
+       scan rows fit. On a 635px-tall viewport the site chrome alone eats ~24%
+       of the screen, so the header and footer get trimmed too — this <style>
+       only loads on scan.php, so no other page is affected. */
+    @media (max-height: 850px) {
+      html { font-size: 16px; }
+      .site-header { padding: 8px 24px; }
+      .site-header img { height: 40px; }
+      /* renderFoot() sets these inline, so they need !important to trim. */
+      .site-footer { margin-top: 12px !important; padding: 8px 16px !important; }
+      .container.scan-page { margin-top: 10px; }
+      .card { padding: 14px; margin-bottom: 12px; }
+      .stat { padding: 5px 8px; }
+      .stat .v { font-size: 1.15rem; }
+      .stat .k { font-size: .68rem; }
+      table.data th, table.data td { padding: 5px 8px; }
+      /* The ✕ button's height, not the text, sets the row height — 30px here
+         roughly doubles how many rows fit versus the 44px touch target. Width
+         stays 3× the height, matching the full-size button's proportions. */
+      .btn-x { width: 90px; height: 30px; font-size: 1rem; border-radius: 6px; }
+      #scanTable th.col-x { width: 106px; }
+      .order-head { margin-bottom: 8px; }
+      #btnRecipe { padding: 8px 14px; font-size: .9rem; }
+      /* 114 = trimmed header (59) + container margin (10) + trimmed footer
+         (12 margin + 31) + 2px slack. Measured at 1366×635. */
+      #thisOrderCard { max-height: calc(100vh - 114px); }
+    }
+
+    /* Below ~1100px there isn't room for two usable columns — fall back to the
+       familiar single-column stack, table still internally scrolled. */
+    @media (max-width: 1100px) {
+      .scan-layout { grid-template-columns: 1fr; }
+      .scan-col > .card:last-child { margin-bottom: 20px; }
+      #thisOrderCard { max-height: 55vh; }
+    }
   </style>
 
-  <div class="card">
-    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:16px;">
-      <h2 style="margin:0;">This Order</h2>
-      <button id="btnRecipe" class="btn btn-secondary" <?= $order ? '' : 'disabled' ?>>🍲 Suggest Recipe</button>
-    </div>
-    <div class="stat-grid" style="margin-bottom:12px;">
-      <div class="stat"><div class="v" id="statCount">0</div><div class="k">Items Scanned</div></div>
-      <div class="stat"><div class="v" id="statUnique">0</div><div class="k">Unique Generics</div></div>
-      <div class="stat"><div class="v" id="statWeight">0.0</div><div class="k">Produce lbs</div></div>
-    </div>
-    <table class="data" id="scanTable">
-      <thead><tr>
-        <th>Time</th><th>Generic</th><th>Kind</th><th class="num">Qty</th><th class="num">Lbs</th><th>Barcode</th><th style="width:54px;"></th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
-    <style>
-      /* Generic-name links open AI prep tips; dotted underline + help cursor
-         so they read as "more info" rather than navigation. */
-      .prep-link { color: var(--brown); font-weight: 600;
-                   text-decoration: underline dotted; text-underline-offset: 3px;
-                   cursor: help; }
-      .prep-link:hover { color: var(--green); }
-      .btn-x { background: var(--red); color: #fff; border: none;
-               border-radius: 8px; width: 44px; height: 44px;
-               font-size: 1.3rem; font-weight: 800; cursor: pointer;
-               line-height: 1; padding: 0; }
-      .btn-x:hover { filter: brightness(1.1); }
-      .btn-x:active { transform: scale(.96); }
-      .btn-x:disabled { opacity: .4; cursor: not-allowed; }
-    </style>
-  </div>
 </div>
 
 <script>
@@ -254,6 +353,11 @@ const state = {
 // Tare (in pounds) subtracted from each entered produce weight; set on the
 // Settings page in ounces.
 const TARE_LBS = <?= json_encode($tareLbs) ?>;
+
+// Scans already recorded against the open order, so a page refresh restores the
+// list (and its ✕ buttons) instead of showing an empty table. Ascending id
+// order — appendRow prepends, so replaying them yields newest-on-top.
+const BOOT_SCANS = <?= json_encode($bootScans, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT) ?>;
 
 // Audible alerts for operator-action-required events, rendered with Web
 // Audio so no asset file is needed. Two distinct sounds so the operator can
@@ -313,6 +417,7 @@ document.addEventListener('focusin', (e) => {
   if (!safe) setTimeout(refocus, 0);
 });
 window.addEventListener('load', refocus);
+
 // Periodic safety net — some scanners send a fast burst right after page load
 // or after Start Order while focus is still on the button.
 setInterval(() => {
@@ -902,10 +1007,12 @@ function resetTable() {
   $('statUnique').textContent = '0';
   $('statWeight').textContent = '0.0';
 }
-function appendRow(it) {
+// timeLabel is supplied only when replaying BOOT_SCANS, so a hydrated row keeps
+// its original scan time instead of showing the page-load time.
+function appendRow(it, timeLabel) {
   const tb = $('scanTable').querySelector('tbody');
   const tr = document.createElement('tr');
-  const t = new Date().toLocaleTimeString();
+  const t = timeLabel || new Date().toLocaleTimeString();
   tr.dataset.scanId = it.id || '';
   tr.innerHTML = `<td>${t}</td>
     <td><a href="#" class="prep-link" title="How do I prepare this item?"
@@ -976,6 +1083,19 @@ function flash(msg, kind) {
   b.textContent = msg;
   $('scanCard').prepend(b);
   setTimeout(() => b.remove(), 4000);
+}
+
+// ── Hydrate the open order's existing scans (page refresh mid-order) ────────
+// MUST stay at the very bottom. recomputeOrderStats() writes to `tableState`,
+// which is a `const` declared above — running this any earlier hits it in the
+// temporal dead zone and throws, which would silently abort every
+// addEventListener call below the throw (End/Cancel/Recipe, the barcode field,
+// the modal buttons). Only the ✕ button would still work, since it is the
+// page's one inline onclick.
+if (BOOT_SCANS.length) {
+  // Ascending id order + prepend = newest on top, matching live scanning.
+  BOOT_SCANS.forEach(s => appendRow(s, s.time_label));
+  recomputeOrderStats(BOOT_SCANS.length);
 }
 </script>
 <?php renderFoot(); ?>

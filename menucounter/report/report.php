@@ -277,8 +277,6 @@ $orderCount = (int)$oStmt->fetchColumn();
   </div>
   </form>
 
-  <?php if (isset($_GET['date_start'])): ?>
-
   <!-- ── Stats ── -->
   <div class="stats">
     <div class="stat-box">
@@ -473,7 +471,6 @@ $orderCount = (int)$oStmt->fetchColumn();
   })();
   </script>
 
-  <?php endif; ?>
   <?php endif; ?>
 
 </div><!-- .page -->

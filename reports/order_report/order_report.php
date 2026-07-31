@@ -21,9 +21,15 @@
 // Items without enough history to fit (new installs, brand-new items) fall
 // back to the original trailing-average method:
 //   Par Level = ADV * LT + Z * σ * √LT,  with S = G = 1
-// where ADV/σ are the mean/stdev of daily demand over the last
-// `velocity_window` days (0-filled, population stats). LT = user-selectable
-// Lead Time; Z = `safety_z` (1.65 ≈ 95% confidence).
+// where ADV is the mean daily demand over the last `velocity_window` days
+// (0-filled, population stats), denominated per calendar day so it lines up
+// with LT and days_left. σ is the stdev over the pantry's *distribution days
+// only* — day-of-week schedule inferred from the scan history by op_open_dow()
+// — then rescaled by √(openDays(LT)/LT) so the identity above still holds. A
+// closed Saturday is schedule rather than demand noise, and counting its zero
+// as volatility inflated safety stock badly (>5x on steady produce). A pantry
+// that distributes 7 days a week is unaffected. LT = user-selectable Lead Time;
+// Z = `safety_z` (1.65 ≈ 95% confidence).
 
 $GLOBALS['FS_PREFIX'] = '../../';
 require_once __DIR__ . '/../../common.php';
@@ -417,6 +423,75 @@ renderNav('report');
       </tbody>
     </table>
     </div>
+    <?php endif; ?>
+  </div>
+
+  <div class="card no-print">
+    <h2>Days Not Scanned</h2>
+    <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
+      List days the pantry <strong>operated but nothing was scanned</strong> —
+      volunteer absent, station down, simply missed. Food left the building with
+      no record of it, so the demand model treats these days as
+      <em>unobserved</em> instead of as days with zero demand, which would drag
+      average daily demand down and quietly suppress reorder alerts.
+    </p>
+    <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
+      Do <strong>not</strong> list days the pantry was genuinely closed
+      (holidays, snow days). Nothing moved on those, and that is honest
+      information about demand.
+    </p>
+    <form method="post" action="../../api_unscanned.php" class="row" style="margin-bottom:14px;">
+      <input type="hidden" name="action" value="add">
+      <div>
+        <label for="usDay">Date</label>
+        <input type="date" id="usDay" name="day" required max="<?= date('Y-m-d') ?>">
+      </div>
+      <div style="flex:2 1 220px;">
+        <label for="usNote">Note (optional)</label>
+        <input type="text" id="usNote" name="note" maxlength="200"
+               placeholder="e.g. no volunteer available">
+      </div>
+      <div style="flex:0 0 120px;">
+        <label>&nbsp;</label>
+        <button type="submit" class="btn btn-primary btn-block">Add</button>
+      </div>
+    </form>
+    <?php
+    // Read defensively: on a partial deploy (PHP files uploaded ahead of
+    // schema.sql) the table won't exist yet, and the panel should degrade to
+    // empty rather than fataling the whole report.
+    $uRows = [];
+    try {
+        $uRows = $db->query("SELECT day, note FROM unscanned_days ORDER BY day DESC")->fetchAll();
+    } catch (\Throwable $e) {
+        $uRows = [];
+    }
+    ?>
+    <?php if ($uRows): ?>
+    <table class="data">
+      <thead><tr>
+        <th>Date</th>
+        <th>Note</th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        <?php foreach ($uRows as $u): ?>
+          <tr>
+            <td><?= htmlspecialchars(date('D, M j, Y', strtotime($u['day']))) ?></td>
+            <td><?= htmlspecialchars((string)$u['note']) ?></td>
+            <td>
+              <form method="post" action="../../api_unscanned.php" style="display:inline;">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="day" value="<?= htmlspecialchars($u['day']) ?>">
+                <button class="btn btn-secondary" style="padding:4px 10px; font-size:.8rem;">Remove</button>
+              </form>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+      </tbody>
+    </table>
+    <?php else: ?>
+      <p style="color:#777;">No missed scanning days recorded.</p>
     <?php endif; ?>
   </div>
 

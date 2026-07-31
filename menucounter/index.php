@@ -16,7 +16,7 @@ if ($visitor_ip !== $allowedIp) {
 // Allowed-hours gate (Settings → Secure Network Access). Same schedule the
 // FoodScan pages honor, evaluated identically via fsScheduleAllowsNow().
 if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
-    fpRenderAccessDenied('Access is closed right now. Please try again during the permitted hours.');
+    fpRenderAccessDenied('Access is closed right now. Please try again when the pantry is open.');
 }
 
 // The admin "On" checkbox (config_items.active) is the ONLY visibility switch

@@ -36,6 +36,27 @@ CREATE INDEX IF NOT EXISTS idx_scans_order   ON scans(order_id);
 CREATE INDEX IF NOT EXISTS idx_scans_generic ON scans(generic_name);
 CREATE INDEX IF NOT EXISTS idx_scans_when    ON scans(scanned_at);
 
+-- Days the pantry operated but nothing was scanned (volunteer absent, station
+-- down, simply forgotten). These days are *unobserved*, not zero-demand: food
+-- left the building with no record of it.
+--
+-- Without this list the Order Report reads a gap as a genuine zero, which
+-- understates demand and therefore biases par levels — and the reorder alerts
+-- that depend on them — low. Listing a day here removes it from the demand
+-- model's exposure instead: see op_glm_fit_series() in
+-- reports/order_report/forecast.php (the weekly Poisson offset becomes
+-- log(observed days) rather than a flat log(7)) and op_report_rows() in
+-- reports/order_report/report_lib.php (the trailing-average denominator).
+--
+-- Only list days the pantry actually operated. A real closure (holiday, snow
+-- day) is a true zero and should NOT be listed — no food moved, and that is
+-- honest information about throughput.
+CREATE TABLE IF NOT EXISTS unscanned_days (
+    day         TEXT PRIMARY KEY,           -- 'YYYY-MM-DD'
+    note        TEXT NOT NULL DEFAULT '',   -- optional reason, for the operator
+    created_at  TEXT NOT NULL
+);
+
 -- Packaged / canned items: UPC -> generic name.
 -- Populated lazily: first time a UPC is seen, OFF API is queried for the
 -- branded product name, then OpenAI maps that name to a generic. The mapping

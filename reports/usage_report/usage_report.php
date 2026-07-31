@@ -63,6 +63,15 @@ foreach ($eventTypesAll as $t) {
 }
 $orderTypeCase .= " WHEN o.note LIKE 'EVENT %' THEN 'Event' ELSE 'Pantry' END";
 
+// Category (produce vs packaged) is a different axis than the stored `kind`.
+// Produce sold by-each (unit='each') is recorded with kind='packaged' so the
+// scan row carries a quantity, not a weight (see lookup.php). To classify it as
+// produce here we test whether the scanned barcode is a produce PLU, i.e. it
+// exists in produce_lookup. Weighed produce (kind='produce') is always in there
+// too, but we keep the OR so a deleted lookup row can't demote it to packaged.
+// The measurement unit (lb vs each) still keys on `kind` throughout.
+$categorySql = "CASE WHEN pl.code IS NOT NULL OR s.kind = 'produce' THEN 'produce' ELSE 'packaged' END";
+
 $conditions = ["s.scanned_at >= :rs", "s.scanned_at <= :re"];
 $params     = [':rs' => $rangeStart, ':re' => $rangeEnd];
 
@@ -74,7 +83,9 @@ if (!empty($selItems)) {
 if (!empty($selKinds)) {
     $ph = [];
     foreach ($selKinds as $i => $v) { $ph[] = ":k$i"; $params[":k$i"] = $v; }
-    $conditions[] = "s.kind IN (" . implode(',', $ph) . ")";
+    // Filter on the derived category so a "produce" filter also catches
+    // produce-by-each items stored with kind='packaged'.
+    $conditions[] = "($categorySql) IN (" . implode(',', $ph) . ")";
 }
 if (!empty($selectedTypes)) {
     $ph = [];
@@ -91,14 +102,16 @@ $sql = "
     SELECT
         s.generic_name,
         s.kind,
+        $categorySql                          AS category,
         $orderTypeSelect                      AS order_type,
         COUNT(*)                              AS scan_count,
         COALESCE(SUM(s.quantity), 0)          AS total_qty,
         COALESCE(SUM(s.weight_lbs), 0)        AS total_weight
     FROM scans s
     JOIN orders o ON o.id = s.order_id
+    LEFT JOIN produce_lookup pl ON pl.code = s.barcode
     WHERE $where
-    GROUP BY s.generic_name, s.kind, order_type
+    GROUP BY s.generic_name, s.kind, category, order_type
     ORDER BY s.generic_name, order_type
 ";
 $stmt = $db->prepare($sql);
@@ -111,6 +124,7 @@ $oSql = "
         COUNT(DISTINCT CASE WHEN $deliveryNoteSql THEN s.order_id END)            AS delivery_orders
     FROM scans s
     JOIN orders o ON o.id = s.order_id
+    LEFT JOIN produce_lookup pl ON pl.code = s.barcode
     WHERE $where
 ";
 $oStmt = $db->prepare($oSql);
@@ -138,6 +152,7 @@ foreach ($results as $r) {
         $chartAgg[$k] = [
             'generic_name' => $r['generic_name'],
             'kind'         => $r['kind'],
+            'category'     => $r['category'],
             'total_qty'    => 0,
             'total_weight' => 0.0,
         ];
@@ -267,8 +282,6 @@ renderNav('usage');
     </div>
   </form>
 
-  <?php if (isset($_GET['date_start'])): ?>
-
   <div class="card">
     <h2>At a Glance</h2>
     <div class="stat-grid">
@@ -315,7 +328,7 @@ renderNav('usage');
           ?>
           <tr>
             <td><?= htmlspecialchars($row['generic_name']) ?></td>
-            <td><span class="type-pill <?= htmlspecialchars($row['kind']) ?>"><?= htmlspecialchars($row['kind']) ?></span></td>
+            <td><span class="type-pill <?= htmlspecialchars($row['category']) ?>"><?= htmlspecialchars($row['category']) ?></span></td>
             <td>
               <span class="type-pill <?= orderTypePillClass($row['order_type']) ?>">
                 <?= htmlspecialchars($row['order_type']) ?>
@@ -324,7 +337,7 @@ renderNav('usage');
             <td class="num"><?= (int)$row['scan_count'] ?></td>
             <td>
               <div class="qty-bar-wrap">
-                <div class="qty-bar <?= htmlspecialchars($row['kind']) ?>" style="width:<?= $pct ?>px;"></div>
+                <div class="qty-bar <?= htmlspecialchars($row['category']) ?>" style="width:<?= $pct ?>px;"></div>
                 <span class="qty-num"><?= htmlspecialchars(fmtAmount($row)) ?></span>
               </div>
             </td>
@@ -345,17 +358,21 @@ renderNav('usage');
   <script>
   (function() {
     var rows = <?= json_encode(array_map(function($r) {
+        // Bar length uses the natural metric per measurement (kind): weighed
+        // produce by pounds, everything else by count. Produce-by-each therefore
+        // charts its quantity, not its (zero) weight.
         $natural = $r['kind'] === 'produce' ? (float)$r['total_weight'] : (int)$r['total_qty'];
         return [
-            'label'   => $r['generic_name'],
-            'kind'    => $r['kind'],
-            'value'   => $natural,
-            'display' => fmtAmount($r),
+            'label'    => $r['generic_name'],
+            'kind'     => $r['kind'],
+            'category' => $r['category'],
+            'value'    => $natural,
+            'display'  => fmtAmount($r),
         ];
     }, $chartRows)) ?>;
     var labels = rows.map(function(r){ return r.label; });
     var values = rows.map(function(r){ return r.value; });
-    var colors = rows.map(function(r){ return r.kind === 'produce' ? '#8BAF3A' : '#6B4C11'; });
+    var colors = rows.map(function(r){ return r.category === 'produce' ? '#8BAF3A' : '#6B4C11'; });
 
     new Chart(document.getElementById('reportChart'), {
       type: 'bar',
@@ -380,7 +397,7 @@ renderNav('usage');
               title: function(ctx) { return ctx[0].label; },
               label: function(ctx) {
                 var r = rows[ctx.dataIndex];
-                return r.kind + ': ' + r.display;
+                return r.category + ': ' + r.display;
               }
             }
           }
@@ -394,7 +411,6 @@ renderNav('usage');
   })();
   </script>
 
-  <?php endif; ?>
   <?php endif; ?>
 
 </div>

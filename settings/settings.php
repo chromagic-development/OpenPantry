@@ -205,10 +205,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         setSetting('tare_oz', (string)$tareOz);
         $sysSaved = 'Tare weight saved.';
     } else {
-        foreach (['openai_api_key', 'openai_model', 'default_lead_time', 'safety_z', 'velocity_window'] as $k) {
+        // Free-text fields: stored as typed.
+        foreach (['openai_api_key', 'openai_model'] as $k) {
             if (isset($_POST[$k])) setSetting($k, trim((string)$_POST[$k]));
         }
-        $msg = 'Settings saved.';
+
+        // Par-level numerics. The inputs' min/max attributes are client-side only,
+        // so anything reaching here has to be checked again: these feed the demand
+        // model directly, and a bad value degrades it silently rather than erroring.
+        // A non-numeric safety_z casts to 0.0 in report_lib and wipes out every
+        // safety stock; a negative one inverts the buffer. Out-of-range values are
+        // clamped, unparseable ones leave the stored setting alone and are named in
+        // the banner so a typo can't quietly change how the pantry orders.
+        $numeric = [
+            'default_lead_time' => ['min' => 1.0, 'max' => 365.0, 'int' => true,  'label' => 'Default Lead Time'],
+            'safety_z'          => ['min' => 0.0, 'max' => 4.0,   'int' => false, 'label' => 'Safety Stock Z'],
+            'velocity_window'   => ['min' => 7.0, 'max' => 365.0, 'int' => true,  'label' => 'Velocity Window'],
+        ];
+        $rejected = [];
+        foreach ($numeric as $k => $spec) {
+            if (!isset($_POST[$k])) continue;
+            $raw = trim((string)$_POST[$k]);
+            if (!is_numeric($raw)) { $rejected[] = $spec['label']; continue; }
+            $v = max($spec['min'], min($spec['max'], (float)$raw));
+            setSetting($k, $spec['int'] ? (string)(int)round($v) : (string)$v);
+        }
+
+        $msg = $rejected
+            ? 'Settings saved, except ' . implode(' and ', $rejected)
+              . ' — not a number, left unchanged.'
+            : 'Settings saved.';
     }
 }
 
@@ -355,7 +381,7 @@ renderNav('settings');
         </div>
         <div>
           <label for="z">Safety Stock Z</label>
-          <input type="number" id="z" name="safety_z" step="0.01" min="0" value="<?= htmlspecialchars($z) ?>">
+          <input type="number" id="z" name="safety_z" step="0.01" min="0" max="4" value="<?= htmlspecialchars($z) ?>">
         </div>
         <div>
           <label for="vw">Velocity Window (days)</label>

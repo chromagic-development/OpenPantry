@@ -13,7 +13,12 @@
 // where λ(t) is the expected *daily* demand (count for packaged items, lbs
 // for produce) on calendar day t. The model is fit on weekly buckets of the
 // item's full scan history (zero-filled, so weeks with no demand count), with
-// an offset of log(7) so exp(Xβ) reads directly as a per-day rate.
+// an offset of log(observed days in the bucket) so exp(Xβ) reads directly as a
+// per-day rate. That offset is what lets a week we only watched part of be
+// modelled honestly: days listed in `unscanned_days` (pantry open, nobody
+// scanning) are dropped from the bucket's exposure rather than counted as
+// zero-demand days, which would drag the fitted rate — and the par levels
+// built on it — low.
 //
 // From one fit we derive everything the report needs:
 //   * Forecast over the lead time   = Σ_{d=1..LT} λ(today+d)
@@ -154,13 +159,18 @@ function op_glm_fit(array $X, array $y, array $offset): array {
 // expensive, cacheable step: the returned coefficients depend only on the
 // training data and the anchor date — not on lead time or Z.
 //
-//   $dailyMap : ['Y-m-d' => amount, …] over the training window (sparse OK;
-//               missing days are treated as zero demand).
-//   $today    : DateTimeImmutable anchor (midnight).
+//   $dailyMap  : ['Y-m-d' => amount, …] over the training window (sparse OK;
+//                missing days are treated as zero demand).
+//   $today     : DateTimeImmutable anchor (midnight).
+//   $unscanned : ['Y-m-d' => true, …] days that were NOT observed — see the
+//                exposure note in the file header. Default [] = every day
+//                observed, i.e. the original behaviour.
 //
 // Returns null when there isn't enough history to fit, otherwise
 // ['beta'=>[], 'disp'=>float, 'harmonics'=>int, 'buckets'=>int].
-function op_glm_fit_series(array $dailyMap, DateTimeImmutable $today): ?array {
+function op_glm_fit_series(
+    array $dailyMap, DateTimeImmutable $today, array $unscanned = []
+): ?array {
     if (!$dailyMap) return null;
 
     // History span from the earliest scan day to today.
@@ -181,21 +191,33 @@ function op_glm_fit_series(array $dailyMap, DateTimeImmutable $today): ?array {
     // earliest scan day; we step in 7-day blocks and stop before the current,
     // still-incomplete week so the last point isn't biased low. Each bucket's
     // representative day (for trend/doy) is its start date.
+    //
+    // Unscanned days are dropped from both the bucket total and its exposure,
+    // so the offset is log(observed) rather than a flat log(7): a week we only
+    // watched 6 days of is fitted as a 6-day sample, not as a week that
+    // happened to be quiet. Any scans that do exist on a day marked unscanned
+    // are dropped along with it, keeping numerator and exposure consistent.
     $X = []; $y = []; $offset = [];
-    $logExposure = log(7.0);
     $wkStart = $earliestDt;
     $cutoff  = $today->modify('-7 days'); // last fully-elapsed week start
     while ($wkStart <= $cutoff) {
         $sum = 0.0;
+        $observed = 0;
         for ($i = 0; $i < 7; $i++) {
             $key = $wkStart->modify("+{$i} days")->format('Y-m-d');
+            if (isset($unscanned[$key])) continue;
+            $observed++;
             if (isset($dailyMap[$key])) $sum += (float)$dailyMap[$key];
         }
-        $tYears = -((int)$wkStart->diff($today)->days) / 365.25; // past = negative
-        $doy = (int)$wkStart->format('z') + 1;                    // 1..366
-        $X[] = op_glm_design_row($tYears, $doy, $harmonics);
-        $y[] = $sum;
-        $offset[] = $logExposure;
+        // A week with nothing observed carries no information about the rate —
+        // log(0) is undefined anyway — so it contributes no bucket at all.
+        if ($observed > 0) {
+            $tYears = -((int)$wkStart->diff($today)->days) / 365.25; // past = negative
+            $doy = (int)$wkStart->format('z') + 1;                    // 1..366
+            $X[] = op_glm_design_row($tYears, $doy, $harmonics);
+            $y[] = $sum;
+            $offset[] = log((float)$observed);
+        }
         $wkStart = $wkStart->modify('+7 days');
     }
 
@@ -279,8 +301,11 @@ function op_project_forecast(array $fit, DateTimeImmutable $today, int $leadTime
 
 // Uncached convenience entry point: fit then project. Used by the CLI
 // self-test and any caller that doesn't want the DB cache.
-function op_forecast_item(array $dailyMap, DateTimeImmutable $today, int $leadTime, float $z): ?array {
-    $fit = op_glm_fit_series($dailyMap, $today);
+function op_forecast_item(
+    array $dailyMap, DateTimeImmutable $today, int $leadTime, float $z,
+    array $unscanned = []
+): ?array {
+    $fit = op_glm_fit_series($dailyMap, $today, $unscanned);
     if ($fit === null) return null;
     return op_project_forecast($fit, $today, $leadTime, $z);
 }
@@ -296,13 +321,21 @@ function op_forecast_item(array $dailyMap, DateTimeImmutable $today, int $leadTi
 // never break the report.
 function op_forecast_item_cached(
     PDO $db, string $name, array $dailyMap, DateTimeImmutable $today,
-    int $leadTime, float $z, bool $ignoreEvents
+    int $leadTime, float $z, bool $ignoreEvents, array $unscanned = []
 ): ?array {
     // Stable hash of the training series (sort so PDO row order can't matter).
     $series = $dailyMap;
     ksort($series);
+    // The unscanned-day set is part of the fit's inputs, so it belongs in the
+    // key: editing the log has to invalidate cached fits or the report would
+    // keep serving yesterday's exposure. Hashed whole rather than clipped to
+    // this item's window — marking any day busts every item's cached fit for
+    // the day, which is fine for an operation this rare.
+    $u = array_keys($unscanned);
+    sort($u);
     $key = sha1($name . '|' . ($ignoreEvents ? 'E1' : 'E0') . '|'
-              . $today->format('Y-m-d') . '|' . md5(json_encode($series)));
+              . $today->format('Y-m-d') . '|' . md5(json_encode($series))
+              . '|U' . md5(implode(',', $u)));
 
     try {
         $sel = $db->prepare('SELECT payload FROM forecast_cache WHERE cache_key = ?');
@@ -318,7 +351,7 @@ function op_forecast_item_cached(
 
         // Cache miss: fit, store, project. Insufficient-history items return
         // null and aren't cached (their early-out is already cheap).
-        $fit = op_glm_fit_series($dailyMap, $today);
+        $fit = op_glm_fit_series($dailyMap, $today, $unscanned);
         if ($fit === null) return null;
 
         $ins = $db->prepare(
@@ -339,7 +372,7 @@ function op_forecast_item_cached(
         return op_project_forecast($fit, $today, $leadTime, $z);
     } catch (\Throwable $e) {
         // DB unavailable / locked / schema missing — just compute uncached.
-        return op_forecast_item($dailyMap, $today, $leadTime, $z);
+        return op_forecast_item($dailyMap, $today, $leadTime, $z, $unscanned);
     }
 }
 
