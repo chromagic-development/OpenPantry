@@ -1,0 +1,10 @@
+# core.autocrlf is on, and git's content sniffing has been treating some of the
+# docs/ PDFs as text — which means line-ending rewriting on checkout, i.e. a
+# corrupted file. Mark the binary assets explicitly so they are never touched.
+*.pdf  binary
+*.jpg  binary
+*.jpeg binary
+*.png  binary
+*.gif  binary
+*.ico  binary
+*.db   binary

@@ -345,6 +345,15 @@ E.append(bullet("<b>Deliverable flag</b> — uncheck it to keep an item in "
 E.append(bullet("<b>Count-per-case</b> — set how many units a supplier "
                 "case holds; the Order Now report then shows a Case Request "
                 "column (order need ÷ case size, rounded up)."))
+E.append(bullet("<b>Order unit &amp; Avg Wt</b> — for produce the pantry weighs "
+                "but the vendor sells by the piece (avocados on the scale in "
+                + code("lb") + ", bought as a 48-count case): set Order Unit to "
+                + code("each") + " and Avg Wt to the average pounds per piece. "
+                "Count-per-case is then read in the order unit, the order sheet "
+                "and email are written in it, and Restock Now converts the "
+                "delivery back to pounds. Leave Order Unit on “same as stock” "
+                "for everything else. Without an Avg Wt there is nothing to "
+                "convert by, so the order falls back to the stock unit."))
 E.append(bullet("<b>Checkout, deliveries, events, OrderAhead</b> all decrement "
                 "inventory automatically as orders close or imports run."))
 E.append(PageBreak())

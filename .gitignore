@@ -9,6 +9,9 @@ encryption_key.php
 # Local Claude Code settings
 .claude/settings.local.json
 
+# Python bytecode from the docs/ PDF generators
+__pycache__/
+
 # OS / editor cruft
 Thumbs.db
 .DS_Store

@@ -63,11 +63,11 @@ def ps(name, **kw):
 
 S = {
     "kicker": ps("kicker", fontName="Arial-Bold", fontSize=9, leading=12,
-                 textColor=OLIVE, spaceBefore=11, spaceAfter=2),
+                 textColor=OLIVE, spaceBefore=9, spaceAfter=2),
     "h1":     ps("h1", fontName="Arial-Bold", fontSize=15.5, leading=19,
                  textColor=BROWN, spaceBefore=2, spaceAfter=4),
     "lead":   ps("lead", fontSize=12, leading=17, spaceBefore=5, spaceAfter=5),
-    "body":   ps("body", fontSize=10.2, leading=14.2, spaceBefore=3.5, spaceAfter=3.5),
+    "body":   ps("body", fontSize=10.2, leading=14.2, spaceBefore=3, spaceAfter=3),
     "quote":  ps("quote", fontName="Arial-Italic", fontSize=11.5, leading=16,
                  leftIndent=18, textColor=HexColor("#55524a"),
                  spaceBefore=7, spaceAfter=7),
@@ -78,8 +78,8 @@ S = {
     "th":     ps("th", fontName="Arial-Bold", fontSize=9.2, leading=12.5,
                  textColor=BROWN),
     "td":     ps("td", fontSize=9.4, leading=13),
-    "foot":   ps("foot", fontSize=8.6, leading=12, textColor=GRAY,
-                 spaceBefore=8),
+    "foot":   ps("foot", fontSize=8.5, leading=11.5, textColor=GRAY,
+                 spaceBefore=5),
 }
 
 def code(t):    return '<font face="Consolas" color="#8a7040">%s</font>' % t
@@ -137,8 +137,8 @@ def datatable(header, rows, widths):
         ("VALIGN",        (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING",   (0, 0), (-1, -1), 9),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 9),
-        ("TOPPADDING",    (0, 0), (-1, -1), 5.5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5.5),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4.5),
         ("LINEBELOW",     (0, 0), (-1, 0), 0.8, RULE_TAN),
     ]
     for r in range(1, len(data)):
@@ -147,13 +147,13 @@ def datatable(header, rows, widths):
         if r < len(data) - 1:
             style.append(("LINEBELOW", (0, r), (-1, r), 0.5, RULE_TAN))
     t.setStyle(TableStyle(style))
-    return KeepTogether([Spacer(1, 4), t, Spacer(1, 5)])
+    return KeepTogether([Spacer(1, 3), t, Spacer(1, 4)])
 
 # ---------------------------------------------------------------- document
 doc = BaseDocTemplate(
     OUT, pagesize=letter,
     leftMargin=0.98 * inch, rightMargin=0.98 * inch,
-    topMargin=0.72 * inch, bottomMargin=0.72 * inch,
+    topMargin=0.62 * inch, bottomMargin=0.62 * inch,
     title="Why a Poisson GLM",
     author="Bruce Alexander \u2022 Chromagic Development")
 frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height,
@@ -227,6 +227,49 @@ E.append(body(
     "<i>canonical</i> link for Poisson, which is why the general IRLS weight "
     "collapses to exactly \u03bc and the solver stays short enough to hand-roll "
     "in dependency-free PHP."))
+
+# ================================================================ why this family
+E.append(kicker("WHY THIS FAMILY"))
+E += h1("Why variance should scale with the mean here")
+E.append(body(
+    "Choosing Poisson means choosing the exponent 1 in Var = φ·μ<super>p</super>. "
+    "That is not an arbitrary pick — it follows from the structure of how a "
+    "pantry is actually used. Households arrive independently of one another, and "
+    "each takes a variable number of items."))
+E.append(codeblock([
+    "N ~ Poisson(λ)    households arriving in the period",
+    "X_i              items taken by household i  (mean m, variance v)",
+    "T = Σ X_i         total demand",
+    "",
+    "E[T]   = λm",
+    "Var[T] = λ(v + m²)",
+    "",
+    "Var[T] / E[T] = (v + m²) / m    ← constant, independent of λ",
+]))
+E.append(body(
+    "Variance comes out <b>exactly proportional to the mean</b>, and the constant "
+    "of proportionality is φ. So φ is not a fudge factor bolted on to rescue a "
+    "bad assumption — it is the average basket size inflated by its own "
+    "variability. A pantry whose households take three items on average "
+    "(m = 3, v = 2) predicts φ = 3.67; φ = 1 arises only in the degenerate case "
+    "where every household takes exactly one item. Over-dispersion is the "
+    "expected state, not a defect."))
+E.append(warn("STATUS OF THIS CLAIM",
+    "This is a <b>structural argument, not an empirical finding.</b> It rests on "
+    "assumptions — arrivals independent, basket size uncorrelated with the "
+    "arrival rate — that are plausible for a pantry but have not been checked "
+    "against the data.<br/><br/>"
+    "The exponent is directly testable: bin the fitted buckets by μ, take the "
+    "empirical variance within each bin, and regress log(Var) on log(μ). The "
+    "slope is p — near 1 vindicates Poisson, near 2 points to Gamma or Tweedie, "
+    "near 0 to Gaussian. That test needs fits spanning a range of demand levels, "
+    "so it cannot run until well after the first fits appear."))
+E.append(body(
+    "<b>Where the argument is thinnest:</b> produce weighed in lbs. If the amount "
+    "distributed is set by what the delivery truck brings rather than by what "
+    "households request, that is a supply constraint rather than an arrival "
+    "process, and there is no reason to expect an exponent of 1. Produce is the "
+    "first place to look if that test ever comes back far from p = 1."))
 
 # ================================================================ objection
 E.append(kicker("THE COMMON OBJECTION"))
@@ -340,10 +383,9 @@ E.append(info("CURRENT STATUS",
     "contributes nothing until the model begins projecting levels it has not "
     "observed, which is when seasonality switches on."))
 E.append(foot(
-    "Gates: history span \u2265 60 days and \u2265 10 complete weekly buckets. "
-    "Harmonic thresholds: 330 days for one, 540 for two. Training window capped "
-    "at 1100 days. Dates above are derived from the earliest scan on record and "
-    "shift if that changes."))
+    "Gates: span \u2265 60 days and \u2265 10 complete weekly buckets. Harmonics: "
+    "330 days for one, 540 for two. Training window capped at 1100 days. Dates "
+    "derive from the earliest scan on record."))
 
 # Glue each section's kicker + heading + rule to the flowable that follows, so
 # a heading can never strand itself at the foot of a page ahead of its own
