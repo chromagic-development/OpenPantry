@@ -37,6 +37,8 @@ function getDB(): PDO {
     migrateAddDeliveryClientVolunteer($db);
     migrateAddInventoryRestockSource($db);
     migrateAddInventoryCountPerCase($db);
+    migrateAddInventoryOrderUnit($db);
+    migrateAddInventoryAltCase($db);
     migrateAddOrderStation($db);
     migrateAddAlertEmailEnabled($db);
     // Convert a stored plaintext (or previously-encrypted) admin_password into
@@ -165,6 +167,36 @@ function migrateAddInventoryCountPerCase(PDO $db): void {
         if (($c['name'] ?? '') === 'count_per_case') return;
     }
     $db->exec("ALTER TABLE inventory ADD COLUMN count_per_case REAL NOT NULL DEFAULT 0");
+}
+
+// Adds inventory.order_unit ('' = same as `unit`) and inventory.lb_per_each
+// (0 = not set) so an item can be stocked in one unit and ordered in another —
+// avocados weighed on the scale in lb but bought as a 48-count case. Both
+// defaults are inert: until an admin fills them in on the Inventory page, every
+// item keeps ordering in its stock unit exactly as before, so count_per_case
+// values entered under the old "always in `unit`" meaning stay correct.
+function migrateAddInventoryOrderUnit(PDO $db): void {
+    $cols = $db->query("PRAGMA table_info(inventory)")->fetchAll(PDO::FETCH_ASSOC);
+    $have = [];
+    foreach ($cols as $c) $have[$c['name'] ?? ''] = true;
+    if (!isset($have['order_unit'])) {
+        $db->exec("ALTER TABLE inventory ADD COLUMN order_unit TEXT NOT NULL DEFAULT ''");
+    }
+    if (!isset($have['lb_per_each'])) {
+        $db->exec("ALTER TABLE inventory ADD COLUMN lb_per_each REAL NOT NULL DEFAULT 0");
+    }
+}
+
+// Adds inventory.alt_case ('' = not set), the vendor's own wording for an
+// item's pack ("89-100 ct case(s), least expensive variety"). Empty everywhere
+// until an admin fills it in on the Inventory page, so order emails keep
+// reading "4 cases - Apples (40 lb)" exactly as before.
+function migrateAddInventoryAltCase(PDO $db): void {
+    $cols = $db->query("PRAGMA table_info(inventory)")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($cols as $c) {
+        if (($c['name'] ?? '') === 'alt_case') return;
+    }
+    $db->exec("ALTER TABLE inventory ADD COLUMN alt_case TEXT NOT NULL DEFAULT ''");
 }
 
 // Adds delivery_clients.volunteer (default '') for the optional "volunteer

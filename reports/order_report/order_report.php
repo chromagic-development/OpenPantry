@@ -30,6 +30,13 @@
 // as volatility inflated safety stock badly (>5x on steady produce). A pantry
 // that distributes 7 days a week is unaffected. LT = user-selectable Lead Time;
 // Z = `safety_z` (1.65 ≈ 95% confidence).
+//
+// All of the above is denominated in the unit the pantry stocks and scans the
+// item in. The vendor may quote its case in the other one — loose avocados are
+// weighed in lb but bought as a 48-count case — so the Order Request crosses
+// over to inventory.order_unit for the case count and the order sheet, then
+// back again for Restock Now, using inventory.lb_per_each. Those conversions
+// all happen in report_lib.php; the table below stays in pantry units.
 
 $GLOBALS['FS_PREFIX'] = '../../';
 require_once __DIR__ . '/../../common.php';
@@ -360,7 +367,7 @@ renderNav('report');
         <th title="Include this item in the order email / Restock Now">Restock</th>
         <th>Generic Name</th>
         <th>Type</th>
-        <th class="num" title="Expected daily demand over the lead time from the item's demand model (or the trailing-window average for fallback items)">Avg Daily<br>(<?= $velWindow ?>d)</th>
+        <th class="num" title="Expected daily demand over the lead time. Model-fitted items derive it from their full scan history; fallback items (marked &deg; after the name) use a trailing <?= $velWindow ?>-day average.">Avg Daily</th>
         <th class="num" title="Per-day demand standard deviation; drives Safety Stock">σ</th>
         <th class="num" title="Z × √(predictive variance) — buffer for demand uncertainty over the lead time">Safety<br>Stock</th>
         <th class="num" title="Seasonality factor: this window's forecast vs. its deseasonalized baseline (1.0 = average season)">S</th>
@@ -369,7 +376,7 @@ renderNav('report');
         <th class="num">In Stock</th>
         <th class="num">Order<br>Request</th>
         <th>Unit</th>
-        <th class="num" title="Whole cases to cover the Order Request, from the Count/Case on the Inventory page">Case<br>Request</th>
+        <th class="num" title="Whole cases to cover the Order Request, from the Count/Case on the Inventory page — counted in the item's Order Unit, which may differ from the unit the pantry stocks it in">Case<br>Request</th>
       </tr></thead>
       <tbody>
       <?php foreach ($rows as $r): ?>
@@ -381,6 +388,10 @@ renderNav('report');
                    data-cpc="<?= htmlspecialchars((string)(float)$r['cpc']) ?>"
                    data-unit="<?= htmlspecialchars($r['unit']) ?>"
                    data-order="<?= htmlspecialchars((string)(float)$r['order']) ?>"
+                   data-order-unit="<?= htmlspecialchars($r['order_unit']) ?>"
+                   data-order-qty="<?= htmlspecialchars((string)(float)$r['order_qty']) ?>"
+                   data-restock-qty="<?= htmlspecialchars((string)(float)$r['restock_qty']) ?>"
+                   data-alt-case="<?= htmlspecialchars((string)($r['alt_case'] ?? '')) ?>"
                    <?= $produceOnly ? 'checked' : '' ?>>
           </td>
           <td><strong><?= htmlspecialchars($r['name']) ?></strong><?php
@@ -408,6 +419,21 @@ renderNav('report');
             <?= $r['unit'] === 'each'
                 ? (int)ceil($r['order'])      // whole units only — round up so demand is fully covered
                 : number_format($r['order'], 1) ?>
+            <?php
+              // The column stays in the pantry's unit so it lines up with In
+              // Stock and the scans behind it. When the vendor orders in the
+              // other unit, show what that works out to — the number the Case
+              // Request below is actually derived from.
+              if ($r['order_unit'] !== $r['unit'] && $r['order'] > 0):
+                  $oqTxt = $r['order_unit'] === 'each'
+                      ? (int)ceil($r['order_qty']) . ' count'
+                      : number_format($r['order_qty'], 1) . ' ' . $r['order_unit'];
+            ?>
+              <div style="font-weight:400; font-size:.75rem; color:#777;"
+                   title="Order Request converted to this item's Order Unit at <?= htmlspecialchars(rtrim(rtrim(number_format($r['lb_per_each'], 3, '.', ''), '0'), '.')) ?> lb each">
+                &asymp; <?= htmlspecialchars($oqTxt) ?>
+              </div>
+            <?php endif; ?>
           </td>
           <td><?= htmlspecialchars($r['unit']) ?></td>
           <td class="num" style="font-weight:800;">
@@ -519,41 +545,70 @@ var ORDER_SUBJECT = <?= json_encode($orderSubject, JSON_HEX_TAG | JSON_HEX_APOS 
 // row carries its cases / count-per-case / unit / order request in
 // data-* attributes, so both the email and the inventory restock reflect
 // exactly what's checked at click time.
+//
+// Every unit conversion is already done server-side in report_lib.php:
+// orderQty is the request in the vendor's unit and restockQty is what the
+// cases put back on the shelf in the pantry's unit. Nothing here converts.
+// For items with no separate order unit, orderUnit/orderQty are just unit
+// and order, so all of this reads the same for them as it always did.
 function gatherCheckedItems() {
   var out = [];
   document.querySelectorAll('.restock-cb:checked').forEach(function (cb) {
     out.push({
-      name:  cb.dataset.name,
-      cases: parseInt(cb.dataset.cases, 10) || 0,
-      cpc:   parseFloat(cb.dataset.cpc) || 0,
-      unit:  cb.dataset.unit,
-      order: parseFloat(cb.dataset.order) || 0
+      name:       cb.dataset.name,
+      cases:      parseInt(cb.dataset.cases, 10) || 0,
+      cpc:        parseFloat(cb.dataset.cpc) || 0,
+      unit:       cb.dataset.unit,
+      order:      parseFloat(cb.dataset.order) || 0,
+      orderUnit:  cb.dataset.orderUnit || cb.dataset.unit,
+      orderQty:   parseFloat(cb.dataset.orderQty) || 0,
+      restockQty: parseFloat(cb.dataset.restockQty) || 0,
+      altCase:    (cb.dataset.altCase || '').trim()
     });
   });
   return out;
 }
 
+// Nothing worth ordering — used to drop rows whose request rounds away, so
+// the email, the print sheet, and the restock all act on the same set.
+function hasOrder(it) {
+  var req = it.orderUnit === 'each'
+          ? Math.ceil(it.orderQty)
+          : Math.round(it.orderQty * 10) / 10;
+  return req > 0;
+}
+
 function fmtNum(n) { return parseFloat(Number(n).toFixed(2)).toString(); }
 
-// One email line per checked item. With a Count/Case set: the case request
-// plus a "(count/case count|lb)" description, where "count" stands in for
-// the 'each' unit. With Count/Case 0 or unavailable: only the Order
-// Request quantity.
+// One email line per checked item, written entirely in the vendor's unit so
+// it can be read straight off the sheet onto an order form. With a
+// Count/Case set: the case request plus a "(count/case count|lb)"
+// description, where "count" stands in for the 'each' unit. With Count/Case
+// 0 or unavailable: only the Order Request quantity.
 function emailLineFor(it) {
+  var unitTxt = it.orderUnit === 'each' ? 'count' : it.orderUnit;
   if (it.cpc > 0) {
-    var unitTxt = it.unit === 'each' ? 'count' : it.unit;
+    // An Alt Case entry on the Inventory page is the vendor's own wording for
+    // the pack ("89-100 ct case(s), least expensive variety"). It stands in
+    // for the word case(s) and takes the "(48 count)" size note with it — the
+    // alt text already describes the pack, so repeating the size reads wrong.
+    if (it.altCase) {
+      return it.cases + ' ' + it.altCase + ' - ' + it.name;
+    }
     return it.cases + ' case' + (it.cases === 1 ? '' : 's') +
            ' - ' + it.name + ' (' + fmtNum(it.cpc) + ' ' + unitTxt + ')';
   }
-  var oq = it.unit === 'each' ? Math.ceil(it.order) : Math.round(it.order * 10) / 10;
-  var oqUnit = it.unit === 'each' ? 'count' : it.unit;
-  return fmtNum(oq) + ' ' + oqUnit + ' - ' + it.name;
+  var oq = it.orderUnit === 'each' ? Math.ceil(it.orderQty)
+                                   : Math.round(it.orderQty * 10) / 10;
+  return fmtNum(oq) + ' ' + unitTxt + ' - ' + it.name;
 }
 
-// Quantity (in the item's unit) the order brings in: cases × count/case,
-// or the Order Request when no Count/Case is set.
+// Quantity the order brings in, in the unit the pantry stocks the item in —
+// cases × count/case converted back, or the Order Request when no
+// Count/Case is set. Computed server-side; restock/submit_restock.php
+// expects the inventory unit and is authoritative about which one that is.
 function restockQtyFor(it) {
-  if (it.cpc > 0) return it.cases * it.cpc;
+  if (it.cpc > 0) return it.restockQty;
   return it.unit === 'each' ? Math.ceil(it.order) : Math.round(it.order * 100) / 100;
 }
 
@@ -569,10 +624,7 @@ function setOrderMsg(text, ok) {
 function generateOrderEmail() {
   // Exclude anything with an Order Request of 0 (nothing actually needed),
   // matching the value shown in the table's Order Request column.
-  var items = gatherCheckedItems().filter(function (it) {
-    var req = it.unit === 'each' ? Math.ceil(it.order) : Math.round(it.order * 10) / 10;
-    return req > 0;
-  });
+  var items = gatherCheckedItems().filter(hasOrder);
   if (!items.length) {
     alert('No checked items have an order request greater than 0.');
     return;
@@ -591,10 +643,7 @@ function generateOrderEmail() {
 // items — the same lines the email uses — instead of mailing them.
 function printOrder() {
   // Match Email Order: drop anything whose Order Request rounds to 0.
-  var items = gatherCheckedItems().filter(function (it) {
-    var req = it.unit === 'each' ? Math.ceil(it.order) : Math.round(it.order * 10) / 10;
-    return req > 0;
-  });
+  var items = gatherCheckedItems().filter(hasOrder);
   if (!items.length) {
     alert('No checked items have an order request greater than 0.');
     return;
@@ -645,6 +694,14 @@ function restockNow() {
   var items = gatherCheckedItems();
   if (!items.length) {
     alert('Check at least one item’s Restock box to add it to inventory.');
+    return;
+  }
+  // Same zero-filter as Email/Print. Without it a row with a Count/Case and a
+  // negligible request is left off the order sheet yet still books a whole
+  // case into inventory.
+  items = items.filter(hasOrder);
+  if (!items.length) {
+    setOrderMsg('No checked items have an order request greater than 0.', false);
     return;
   }
   var fd = new FormData();

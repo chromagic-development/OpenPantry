@@ -95,10 +95,26 @@ CREATE TABLE IF NOT EXISTS inventory (
     -- of these per batch based on the "Purchased" checkbox.
     restocked_purchased REAL NOT NULL DEFAULT 0,
     restocked_donated   REAL NOT NULL DEFAULT 0,
-    -- How many units (in `unit`) one supplier case holds. 0 = not set.
+    -- How many units (in `order_unit`) one supplier case holds. 0 = not set.
     -- Drives the Case Request column on the Order Report:
     -- cases = ceil(order request / count_per_case).
-    count_per_case      REAL NOT NULL DEFAULT 0
+    count_per_case      REAL NOT NULL DEFAULT 0,
+    -- The unit the wholesale vendor quotes this item's case in, when it differs
+    -- from the unit the pantry stocks and scans it in. '' = same as `unit`.
+    -- Loose produce is weighed on a scale (unit='lb') but some of it is sold by
+    -- the piece — a 48-count case of avocados — so the order has to be placed in
+    -- 'each' and the delivery booked back into inventory in 'lb'.
+    order_unit          TEXT NOT NULL DEFAULT '',       -- '' | 'each' | 'lb'
+    -- Average weight in pounds of one piece, which is what makes that round trip
+    -- possible: each -> lb multiplies by it, lb -> each divides. 0 = not set,
+    -- in which case order_unit is ignored and the item orders in `unit`.
+    lb_per_each         REAL NOT NULL DEFAULT 0,
+    -- The vendor's own wording for this item's pack, e.g. "89-100 ct case(s),
+    -- least expensive variety". '' = not set. When set, the Order Report's
+    -- Email/Print order lines say "4 <alt_case> - Apples" in place of the
+    -- default "4 cases - Apples (40 lb)" — it replaces the word case(s) and
+    -- the trailing pack-size note, which the alt text already spells out.
+    alt_case            TEXT NOT NULL DEFAULT ''
 );
 
 -- Key/value settings: OpenAI key, default lead time, safety-stock Z, etc.

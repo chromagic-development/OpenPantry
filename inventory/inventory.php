@@ -33,6 +33,8 @@ ksort($names, SORT_NATURAL | SORT_FLAG_CASE);
 
 $saved = false;
 $produceCleared = false;
+// Rows saved with an Order Unit but no Avg Wt to convert by (see the save loop).
+$needsWeight = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (($_POST['action'] ?? '') === 'remove_produce') {
         // Zero out the current count for every produce item (any generic_name
@@ -63,6 +65,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // null = field absent (never true on the JS path, which
                     // always sends the case value, possibly '').
                     'case'  => array_key_exists('case', $r) ? (string)$r['case'] : null,
+                    'ounit' => array_key_exists('ounit', $r) ? (string)$r['ounit'] : null,
+                    'lbea'  => array_key_exists('lbea', $r)  ? (string)$r['lbea']  : null,
+                    'alt'   => array_key_exists('alt', $r)   ? (string)$r['alt']   : null,
                     'del'   => !empty($r['del']),
                 ];
             }
@@ -75,6 +80,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $counts     = $_POST['count']      ?? [];
             $units      = $_POST['unit']       ?? [];
             $caseCounts = $_POST['case_count'] ?? [];
+            $orderUnits = $_POST['order_unit']  ?? [];
+            $lbPerEachs = $_POST['lb_per_each'] ?? [];
+            $altCases   = $_POST['alt_case']    ?? [];
             // Deliverable: unchecked boxes don't submit at all, so default
             // every submitted row to 0 and flip the ones the browser DID send.
             $deliverablePost = $_POST['deliverable'] ?? [];
@@ -84,6 +92,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'count' => (string)($counts[$i] ?? ''),
                     'unit'  => (string)($units[$i] ?? ''),
                     'case'  => array_key_exists($i, $caseCounts) ? (string)$caseCounts[$i] : null,
+                    'ounit' => array_key_exists($i, $orderUnits) ? (string)$orderUnits[$i] : null,
+                    'lbea'  => array_key_exists($i, $lbPerEachs) ? (string)$lbPerEachs[$i] : null,
+                    'alt'   => array_key_exists($i, $altCases)   ? (string)$altCases[$i]   : null,
                     'del'   => isset($deliverablePost[$i]),
                 ];
             }
@@ -101,14 +112,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
              VALUES (?, 0, ?, ?, ?)
              ON CONFLICT(generic_name) DO UPDATE SET deliverable = excluded.deliverable"
         );
-        // Count/Case: also independent of count, persisted whenever the
-        // field holds a value. 0 (or clearing the field) = "not set", which
-        // the Order Report renders as "—" in its Case Request column.
-        $updCase = $db->prepare(
-            "INSERT INTO inventory (generic_name, count, unit, updated_at, count_per_case)
-             VALUES (?, 0, ?, ?, ?)
-             ON CONFLICT(generic_name) DO UPDATE SET count_per_case = excluded.count_per_case"
+        // The four ordering fields, also independent of count and written
+        // together because they only mean anything as a set: Count/Case is a
+        // number of Order Units, Order Unit is only honoured when Avg Wt
+        // supplies the conversion, and Alt Case renames the case the other
+        // three add up to. 0 / '' = "not set", which the Order Report renders
+        // as "—" in its Case Request column, treats as "order in the stock
+        // unit", and reads as the plain word "case(s)" respectively.
+        $updOrder = $db->prepare(
+            "INSERT INTO inventory (generic_name, count, unit, updated_at, count_per_case, order_unit, lb_per_each, alt_case)
+             VALUES (?, 0, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(generic_name) DO UPDATE SET
+               count_per_case = excluded.count_per_case,
+               order_unit     = excluded.order_unit,
+               lb_per_each    = excluded.lb_per_each,
+               alt_case       = excluded.alt_case"
         );
+        // Current ordering fields, so a submission that omits one of the four
+        // (a truncated or hand-rolled POST) preserves it instead of zeroing it.
+        $curOrder = [];
+        foreach ($db->query("SELECT generic_name, count_per_case, order_unit, lb_per_each, alt_case FROM inventory") as $c) {
+            $curOrder[$c['generic_name']] = $c;
+        }
         // The unit also lives in produce_lookup, so keep it in sync — otherwise
         // changing a produce item's unit here (e.g. lb -> each) leaves the
         // lookup table stale. The UPDATE is a harmless no-op for non-produce names.
@@ -126,12 +151,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $updProduce->execute([$u, $name]);
             // Always persist deliverable (independent of count).
             $updDel->execute([$name, $u, now(), $del]);
-            // Persist Count/Case whenever the field was submitted. An emptied
-            // field maps back to 0 ("not set") so a stale case size can be cleared.
-            if ($r['case'] !== null) {
-                $cv  = $r['case'];
-                $cpc = (is_numeric($cv) && (float)$cv > 0) ? (float)$cv : 0.0;
-                $updCase->execute([$name, $u, now(), $cpc]);
+            // Persist the ordering fields whenever any of them was submitted.
+            // An emptied field maps back to 0 / '' ("not set") so a stale case
+            // size or order unit can be cleared; a field the POST left out
+            // entirely keeps its stored value.
+            if ($r['case'] !== null || $r['ounit'] !== null || $r['lbea'] !== null
+                || $r['alt'] !== null) {
+                $cur = $curOrder[$name] ?? [];
+                $cpc = $r['case'] !== null
+                     ? ((is_numeric($r['case']) && (float)$r['case'] > 0) ? (float)$r['case'] : 0.0)
+                     : (float)($cur['count_per_case'] ?? 0);
+                $ou  = $r['ounit'] !== null
+                     ? (($r['ounit'] === 'lb' || $r['ounit'] === 'each') ? $r['ounit'] : '')
+                     : (string)($cur['order_unit'] ?? '');
+                $lbe = $r['lbea'] !== null
+                     ? ((is_numeric($r['lbea']) && (float)$r['lbea'] > 0) ? (float)$r['lbea'] : 0.0)
+                     : (float)($cur['lb_per_each'] ?? 0);
+                // Free text, so only collapse the whitespace — the wording is
+                // the vendor's and goes into the order email verbatim. Newlines
+                // would break the one-line-per-item email format.
+                // (?? falls back when the subject isn't valid UTF-8, which
+                // makes preg_replace return null rather than a string.)
+                $alt = $r['alt'] !== null
+                     ? trim(preg_replace('/\s+/u', ' ', $r['alt']) ?? $r['alt'])
+                     : (string)($cur['alt_case'] ?? '');
+                if (mb_strlen($alt) > 200) $alt = mb_substr($alt, 0, 200);
+                // Picking the stock unit as the order unit is just "no
+                // override" — store it as such so the report never has to
+                // special-case the two being equal.
+                if ($ou === $u) $ou = '';
+                // Set to order in the other unit with no average weight to
+                // convert by: the Order Report falls back to the stock unit, so
+                // flag it rather than let the row look configured.
+                if ($ou !== '' && $lbe <= 0) $needsWeight[] = $name;
+                $updOrder->execute([$name, $u, now(), $cpc, $ou, $lbe, $alt]);
             }
             // Persist count + unit only if the user actually entered a value.
             if ($r['count'] === '') continue;
@@ -144,7 +197,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $inv = [];
 foreach ($db->query(
     "SELECT generic_name, count, unit, updated_at, deliverable,
-            restocked_purchased, restocked_donated, count_per_case
+            restocked_purchased, restocked_donated, count_per_case,
+            order_unit, lb_per_each, alt_case
        FROM inventory") as $r) {
     $inv[$r['generic_name']] = $r;
 }
@@ -168,6 +222,15 @@ renderNav('inventory');
 <div class="container">
   <?php if ($saved): ?>
     <div class="banner success">✅ Inventory updated.</div>
+  <?php endif; ?>
+  <?php if ($needsWeight): ?>
+    <div class="banner warn">
+      ⚠ Set an <strong>Avg Wt</strong> for
+      <?= htmlspecialchars(implode(', ', $needsWeight)) ?> —
+      without a weight per piece there's nothing to convert by, so the Order
+      Report will keep ordering <?= count($needsWeight) === 1 ? 'it' : 'them' ?>
+      in the pantry's own unit and ignore the Order Unit.
+    </div>
   <?php endif; ?>
   <?php if ($produceCleared): ?>
     <div class="banner success">✅ Produce stock removed (all produce counts set to zero).</div>
@@ -208,14 +271,25 @@ renderNav('inventory');
       <input type="hidden" name="rows_json" id="rowsJson" value="">
       <div class="inv-table-wrap">
       <table class="data" id="invTable">
+        <!-- Percentage widths + table-layout:fixed keep all ten columns inside
+             the card no matter how long a generic name runs, so the table never
+             needs to scroll sideways on a desktop screen. -->
+        <colgroup>
+          <col class="c-name"><col class="c-del"><col class="c-count">
+          <col class="c-unit"><col class="c-ounit"><col class="c-lbea">
+          <col class="c-cpc"><col class="c-alt"><col class="c-pct"><col class="c-upd">
+        </colgroup>
         <thead><tr>
-          <th>Generic Name</th>
-          <th title="Show this item on the client delivery menu (does not affect the PantryPrep counter form)">Deliverable</th>
-          <th class="num">Current Count</th>
+          <th>Generic<br>Name</th>
+          <th title="Show this item on the client delivery menu (does not affect the PantryPrep counter form)">Deliver&shy;able</th>
+          <th class="num">Current<br>Count</th>
           <th>Unit</th>
-          <th class="num" title="How many units one supplier case holds — used for the Case Request column on the Order Report">Count/Case</th>
-          <th class="num" title="Lifetime % of this item's restocked amount that was purchased rather than donated">Purchased</th>
-          <th>Last Updated</th>
+          <th title="The unit the wholesale vendor quotes this item's case in, when it differs from the unit the pantry stocks it in — loose avocados weighed in lb but bought by the 48-count case. Needs an Avg Wt to convert by.">Order<br>Unit</th>
+          <th class="num" title="Average weight of one piece, in pounds. This is what converts between the two units: the Order Report divides by it to place the order in pieces and multiplies by it to book the delivery back into pounds.">Avg Wt<br>(lb ea)</th>
+          <th class="num" title="How many Order Units one supplier case holds — used for the Case Request column on the Order Report">Count/<br>Case</th>
+          <th title="The vendor's own wording for this item's pack. When filled in, the Order Report's Email Order and Print Order lines read &quot;4 89-100 ct case(s), least expensive variety - Apples&quot; in place of the default &quot;4 cases - Apples (40 lb)&quot;: it replaces the word case(s) and the pack-size note in parentheses. Only the first few characters fit the column; the whole entry is stored and used.">Alt<br>Case</th>
+          <th class="num" title="Lifetime % of this item's restocked amount that was purchased rather than donated">Bought</th>
+          <th>Last<br>Updated</th>
         </tr></thead>
         <tbody>
         <?php $i = 0; foreach ($names as $name => $defaultUnit): $i++;
@@ -238,16 +312,27 @@ renderNav('inventory');
             $cpcDisplay = $cpc > 0
                 ? rtrim(rtrim(number_format($cpc, 2, '.', ''), '0'), '.')
                 : '';
+            // Order unit: '' = same as the stock unit (the common case).
+            $orderUnit = (string)($row['order_unit'] ?? '');
+            // Avg weight per piece: 0 = unset → blank. Three decimals, since a
+            // small piece of produce can weigh well under a tenth of a pound.
+            $lbEach = (float)($row['lb_per_each'] ?? 0);
+            $lbEachDisplay = $lbEach > 0
+                ? rtrim(rtrim(number_format($lbEach, 3, '.', ''), '0'), '.')
+                : '';
+            // Alt Case: free text, '' = unset. The field is only ~10 characters
+            // wide, so the full entry lives in the title tooltip too.
+            $altCase = (string)($row['alt_case'] ?? '');
         ?>
           <tr data-name="<?= htmlspecialchars(strtolower($name)) ?>" data-kind="<?= htmlspecialchars($kinds[$name] ?? 'packaged') ?>">
-            <td>
+            <td class="inv-name">
               <input type="hidden" name="name[<?= $i ?>]" value="<?= htmlspecialchars($name) ?>">
               <?= htmlspecialchars($name) ?></td>
             <td style="text-align:center;">
               <input type="checkbox"
                      name="deliverable[<?= $i ?>]"
                      value="1"<?= $deliverable === 1 ? ' checked' : '' ?>
-                     style="width:20px; height:20px; cursor:pointer;">
+                     class="inv-check">
             </td>
             <td class="num">
               <div class="inv-counter">
@@ -264,20 +349,38 @@ renderNav('inventory');
               </div>
             </td>
             <td>
-              <select name="unit[<?= $i ?>]" style="width:90px;"
-                      onchange="syncStep(this)">
+              <select name="unit[<?= $i ?>]" onchange="syncStep(this)">
                 <option value="each" <?= $unit==='each'?'selected':'' ?>>each</option>
                 <option value="lb"   <?= $unit==='lb'  ?'selected':'' ?>>lb</option>
               </select>
             </td>
+            <td>
+              <select name="order_unit[<?= $i ?>]" title="The unit this item is ordered in. &quot;same&quot; means the vendor quotes it in the pantry's own stock unit.">
+                <option value="" <?= $orderUnit===''    ?'selected':'' ?>>same</option>
+                <option value="each" <?= $orderUnit==='each'?'selected':'' ?>>each</option>
+                <option value="lb"   <?= $orderUnit==='lb'  ?'selected':'' ?>>lb</option>
+              </select>
+            </td>
+            <td class="num">
+              <input type="number" step="any" min="0" placeholder="—"
+                     name="lb_per_each[<?= $i ?>]"
+                     value="<?= htmlspecialchars($lbEachDisplay) ?>">
+            </td>
             <td class="num">
               <input type="number" step="any" min="0" placeholder="—"
                      name="case_count[<?= $i ?>]"
-                     value="<?= htmlspecialchars($cpcDisplay) ?>"
-                     style="width:80px; text-align:right;">
+                     value="<?= htmlspecialchars($cpcDisplay) ?>">
+            </td>
+            <td>
+              <input type="text" class="inv-alt" maxlength="200" placeholder="—"
+                     name="alt_case[<?= $i ?>]"
+                     value="<?= htmlspecialchars($altCase) ?>"
+                     title="<?= $altCase === ''
+                         ? 'Vendor wording for this pack, used in place of &quot;case(s)&quot; on the order email and print sheet'
+                         : htmlspecialchars($altCase) ?>">
             </td>
             <td class="num" style="font-variant-numeric: tabular-nums;"><?= htmlspecialchars(purchasedPctDisplay($row)) ?></td>
-            <td style="color:#777; font-size:.8rem;"><?= htmlspecialchars($row['updated_at'] ?? '—') ?></td>
+            <td class="inv-updated"><?= htmlspecialchars($row['updated_at'] ?? '—') ?></td>
           </tr>
         <?php endforeach; ?>
         </tbody>
@@ -291,15 +394,64 @@ renderNav('inventory');
   </div>
 </div>
 <style>
-  /* The inventory table is wider than the card on narrow viewports, which let
-     the Last Updated column bleed past the card's right edge. Confine it to the
-     card and scroll horizontally instead. */
+  /* All nine columns are sized as a percentage of the card so the table fits
+     the page width and never scrolls sideways on a desktop screen. The wrapper
+     keeps overflow-x only as the phone fallback, where the controls would
+     otherwise be squeezed below a usable size (see min-width on the table). */
   .inv-table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .inv-counter { display: inline-flex; align-items: center; gap: 8px; }
-  .inv-count-input { width: 110px; text-align: right; font-size: 1.1rem; }
+  /* min-width is the phone floor: below it the wrapper scrolls rather than
+     squeezing the selects and the count field down to unusable slivers. Any
+     card wider than this (every desktop and tablet width) fits with no scroll. */
+  #invTable { table-layout: fixed; min-width: 780px; }
+  /* Percentages total 100 — the widths below are the whole budget. */
+  #invTable .c-name  { width: 14%; }
+  #invTable .c-del   { width:  9%; }
+  #invTable .c-count { width: 17%; }
+  #invTable .c-unit  { width:  8%; }
+  #invTable .c-ounit { width:  9%; }
+  #invTable .c-lbea  { width:  8%; }
+  #invTable .c-cpc   { width:  8%; }
+  #invTable .c-alt   { width: 10%; }
+  #invTable .c-pct   { width:  8%; }
+  #invTable .c-upd   { width:  9%; }
+  /* Tighter than the shared table.data rhythm: at 18px root the default
+     8px/10px padding alone costs ~200px across ten columns. */
+  #invTable th, #invTable td { padding: 6px 5px; font-size: .8rem; }
+  #invTable th { font-size: .62rem; line-height: 1.25; hyphens: auto; }
+  #invTable .inv-name { overflow-wrap: anywhere; }
+  #invTable .inv-updated { color: #777; font-size: .68rem; line-height: 1.3; }
+  #invTable .inv-check { width: 20px; height: 20px; cursor: pointer; }
+  /* Controls fill their column instead of carrying fixed pixel widths. */
+  #invTable select,
+  #invTable input[type=number],
+  #invTable input[type=text] {
+    width: 100%; padding: 6px 4px;
+    font-size: .85rem; border-width: 1px;
+  }
+  /* Alt Case holds a sentence in a ~10-character slot: smaller type, and the
+     caret scrolls through the rest of the entry (the full text is in the
+     field's tooltip). */
+  #invTable .inv-alt { font-size: .7rem; text-overflow: ellipsis; }
+  #invTable input[type=number] { text-align: right; }
+  /* Spinner arrows cost ~15px per number field and the count already has its
+     own +/- buttons, so drop them. */
+  #invTable input[type=number]::-webkit-outer-spin-button,
+  #invTable input[type=number]::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  #invTable input[type=number] { -moz-appearance: textfield; }
+  /* The count input flexes into whatever the buttons leave, so the counter
+     always fits its column. */
+  .inv-counter { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+  /* Explicit flex-basis, not auto: a number input's intrinsic width is far
+     wider than the column and would otherwise shrink the buttons instead. */
+  .inv-count-input { flex: 1 1 50px; min-width: 50px; text-align: right; }
+  #invTable .inv-count-input { font-size: .9rem; padding: 6px 4px; }
+  /* The buttons hold 44px wherever there's room and give ground before the
+     count field does, so the counter never spills out of its column. */
   .inv-btn {
-    width: 54px; height: 54px;
-    font-size: 1.9rem; font-weight: 800; line-height: 1;
+    flex: 0 1 44px; width: 44px; min-width: 30px; height: 44px;
+    font-size: 1.5rem; font-weight: 800; line-height: 1;
     padding: 0; cursor: pointer;
     border: 1px solid var(--border); border-radius: 10px;
     background: #fafaf5; color: var(--brown);
@@ -334,7 +486,9 @@ function bumpCount(btn, delta) {
 // step so the spinner moves in whole units for 'each' and 0.01 for 'lb',
 // and round any visible value to match.
 function syncStep(sel) {
-  var input = sel.closest('tr').querySelector('input[type=number]');
+  // Target the count field by class — the row also holds Avg Wt and Count/Case
+  // number inputs, and neither should be re-stepped by the unit dropdown.
+  var input = sel.closest('tr').querySelector('.inv-count-input');
   if (!input) return;
   if (sel.value === 'each') {
     input.step = '1';
@@ -359,12 +513,18 @@ if (invForm) invForm.addEventListener('submit', function() {
     var cnt     = tr.querySelector('.inv-count-input');
     var unitSel = tr.querySelector('select[name^="unit["]');
     var caseIn  = tr.querySelector('input[name^="case_count["]');
+    var ounitSel= tr.querySelector('select[name^="order_unit["]');
+    var lbeaIn  = tr.querySelector('input[name^="lb_per_each["]');
+    var altIn   = tr.querySelector('input[name^="alt_case["]');
     var delCb   = tr.querySelector('input[type=checkbox][name^="deliverable["]');
     data.push({
       name:   nameInput.value,
       count:  cnt ? cnt.value : '',
       unit:   unitSel ? unitSel.value : '',
       'case': caseIn ? caseIn.value : '',
+      ounit:  ounitSel ? ounitSel.value : '',
+      lbea:   lbeaIn ? lbeaIn.value : '',
+      alt:    altIn ? altIn.value : '',
       del:    !!(delCb && delCb.checked)
     });
   });

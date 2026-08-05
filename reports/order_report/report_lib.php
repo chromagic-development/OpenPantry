@@ -21,6 +21,26 @@ const OP_HIST_DAYS = 1100;
 // alert re-triggered within this window so a frequent cron doesn't spam.
 const OP_ALERT_EMAIL_MIN_HOURS = 20;
 
+// Convert a quantity between the only two units the app knows, using the item's
+// average weight per piece (inventory.lb_per_each).
+//
+// This is what lets an item be stocked in one unit and ordered in another: loose
+// produce is weighed on the scale in 'lb', but the vendor sells avocados by the
+// 48-count case, so the order request has to cross over to 'each' on the way out
+// and back to 'lb' when the delivery is booked in. One factor covers both
+// directions, and the inverse case too (a counted item sold as a 40 lb case).
+//
+// Returns null when the units differ and the factor isn't set — the conversion
+// is genuinely unknown, and callers must fall back to the stock unit rather than
+// invent a number (or divide by zero).
+function op_convert_qty(float $qty, string $from, string $to, float $lbPerEach): ?float {
+    if ($from === $to)   return $qty;
+    if ($lbPerEach <= 0) return null;
+    if ($from === 'each' && $to === 'lb')   return $qty * $lbPerEach;
+    if ($from === 'lb'   && $to === 'each') return $qty / $lbPerEach;
+    return null;  // unit outside {each, lb} — nothing sensible to do
+}
+
 // Days the pantry operated but nothing was scanned, as a ['Y-m-d' => true] set
 // (see the unscanned_days table in schema.sql). The demand model treats these
 // as unobserved rather than as zero demand, so a missed scanning day no longer
@@ -145,7 +165,7 @@ function op_report_rows(PDO $db, array $opts = []): array {
     }
 
     $inv = [];
-    foreach ($db->query("SELECT generic_name, count, unit, count_per_case, restocked_purchased FROM inventory") as $r) {
+    foreach ($db->query("SELECT generic_name, count, unit, count_per_case, order_unit, lb_per_each, alt_case, restocked_purchased FROM inventory") as $r) {
         $inv[$r['generic_name']] = $r;
     }
 
@@ -237,15 +257,42 @@ function op_report_rows(PDO $db, array $opts = []): array {
         $effStock = $ignoreStock ? 0.0 : $stock;
         $orderReq = max(0.0, $par - $effStock);
 
+        // Everything above — demand, par, order request — is denominated in the
+        // unit the pantry stocks and scans the item in. The vendor may quote its
+        // case in the other one, so the case maths crosses over here and back
+        // again for the restock, and only here.
+        $unit = $inv[$name]['unit'] ?? ($kinds[$name] === 'produce' ? 'lb' : 'each');
+        $lbPerEach = (float)($inv[$name]['lb_per_each'] ?? 0);
+        $orderUnit = (string)($inv[$name]['order_unit'] ?? '');
+        // A half-configured item (order unit set, average weight missing or a
+        // junk unit stored) falls back to the stock unit — today's behaviour —
+        // rather than producing a case count nobody can trust. inventory.php
+        // warns on save when that happens.
+        $orderQty  = ($orderUnit === 'each' || $orderUnit === 'lb')
+                   ? op_convert_qty($orderReq, $unit, $orderUnit, $lbPerEach)
+                   : null;
+        if ($orderQty === null) {
+            $orderUnit = $unit;
+            $orderQty  = $orderReq;
+        }
+
         $cpc   = (float)($inv[$name]['count_per_case'] ?? 0);
-        $cases = ($cpc > 0 && $orderReq > 0) ? (int)ceil($orderReq / $cpc) : 0;
+        // count_per_case is in the order unit, so the ceil to whole cases lands
+        // on vendor units — 5.25 cases of avocados becomes 6, never 5.
+        $cases = ($cpc > 0 && $orderQty > 0) ? (int)ceil($orderQty / $cpc) : 0;
+        // What those cases actually add to the shelf, back in the stock unit.
+        // Restock Now posts this, so a 6 × 48-count case order books in as
+        // 144 lb rather than 288 of anything.
+        $restockQty = $cpc > 0
+            ? (op_convert_qty($cases * $cpc, $orderUnit, $unit, $lbPerEach) ?? ($cases * $cpc))
+            : $orderReq;
 
         $catKind = isset($produceNamesLc[strtolower($name)]) ? 'produce' : $kinds[$name];
 
         $rows[] = [
             'name'    => $name,
             'kind'    => $catKind,
-            'unit'    => $inv[$name]['unit'] ?? ($kinds[$name] === 'produce' ? 'lb' : 'each'),
+            'unit'    => $unit,
             'adv'     => $adv,
             'sigma'   => $sigma,
             'safety'  => $safety,
@@ -256,6 +303,16 @@ function op_report_rows(PDO $db, array $opts = []): array {
             'order'   => $orderReq,
             'cpc'     => $cpc,
             'cases'   => $cases,
+            // The vendor's own wording for the pack, from the Inventory page's
+            // Alt Case field. '' = use the plain word "case(s)".
+            'alt_case' => (string)($inv[$name]['alt_case'] ?? ''),
+            // Vendor-facing figures. 'order_unit' equals 'unit' and 'order_qty'
+            // equals 'order' whenever no separate order unit is configured, so
+            // consumers can use these unconditionally.
+            'order_unit'  => $orderUnit,
+            'lb_per_each' => $lbPerEach,
+            'order_qty'   => $orderQty,
+            'restock_qty' => $restockQty,
             'purchased' => (float)($inv[$name]['restocked_purchased'] ?? 0),
             'days_left' => $adv > 0 ? ($stock / $adv) : INF,
         ];
