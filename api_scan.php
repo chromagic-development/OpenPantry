@@ -3,7 +3,8 @@
 // POST { action: 'lookup', barcode }                          -> resolve only, do not insert.
 // POST { action: 'record', barcode, weight_lbs?, quantity? }  -> resolve + insert; returns the new scan_id.
 // POST { action: 'delete', scan_id }                          -> remove a scan, only if it belongs to the current open order.
-// POST { action: 'search', q }                                -> partial name match against the lookup tables.
+// POST { action: 'search', q, scope? }                        -> partial name match against the lookup tables.
+//        scope='weighed' restricts to produce codes sold by the pound.
 
 require_once __DIR__ . '/common.php';
 require_once __DIR__ . '/auth.php';
@@ -19,19 +20,33 @@ if ($action === 'search') {
     // both lookup tables (plus UPC brand names) and dedupes by generic name —
     // when several codes share a name, the produce PLU wins over a cached UPC
     // so the recorded barcode is the pantry's own code where one exists.
+    // scope='weighed' narrows this to produce_lookup rows priced by the pound.
     $q = trim((string)($in['q'] ?? ''));
     if (strlen($q) < 2) jsonOut(['ok' => true, 'matches' => [], 'total' => 0]);
     $like = '%' . strtr($q, ['\\' => '\\\\', '%' => '\\%', '_' => '\\_']) . '%';
-    $st = getDB()->prepare(
-        "SELECT code, generic_name, '' AS brand_name, 'produce' AS src
-           FROM produce_lookup
-          WHERE generic_name LIKE ? ESCAPE '\\'
-         UNION ALL
-         SELECT upc AS code, generic_name, COALESCE(brand_name, '') AS brand_name, 'upc' AS src
-           FROM upc_lookup
-          WHERE generic_name LIKE ? ESCAPE '\\' OR brand_name LIKE ? ESCAPE '\\'"
-    );
-    $st->execute([$like, $like, $like]);
+    if (($in['scope'] ?? '') === 'weighed') {
+        // The scan page's PLU window: a scale reading is already held, so the
+        // only codes that can identify the item are produce PLUs sold by the
+        // pound. Cached UPCs and count-based produce are excluded outright —
+        // picking one would throw the weight away.
+        $st = getDB()->prepare(
+            "SELECT code, generic_name, '' AS brand_name, 'produce' AS src
+               FROM produce_lookup
+              WHERE unit = 'lb' AND generic_name LIKE ? ESCAPE '\\'"
+        );
+        $st->execute([$like]);
+    } else {
+        $st = getDB()->prepare(
+            "SELECT code, generic_name, '' AS brand_name, 'produce' AS src
+               FROM produce_lookup
+              WHERE generic_name LIKE ? ESCAPE '\\'
+             UNION ALL
+             SELECT upc AS code, generic_name, COALESCE(brand_name, '') AS brand_name, 'upc' AS src
+               FROM upc_lookup
+              WHERE generic_name LIKE ? ESCAPE '\\' OR brand_name LIKE ? ESCAPE '\\'"
+        );
+        $st->execute([$like, $like, $like]);
+    }
     $matches = [];
     foreach ($st->fetchAll() as $row) {
         $key = mb_strtolower($row['generic_name']);
@@ -55,7 +70,9 @@ if ($action === 'delete') {
     $scanId = (int)($in['scan_id'] ?? 0);
     if ($scanId <= 0) jsonOut(['ok' => false, 'error' => 'Missing scan_id'], 400);
 
-    $open = currentOpenOrder();
+    // activeScanOrder(), so a station assisting a team-scanned order can pull a
+    // mis-scan back out of it — including one its teammate entered.
+    $open = activeScanOrder();
     if (!$open) jsonOut(['ok' => false, 'error' => 'No open order'], 409);
 
     $db = getDB();
@@ -96,7 +113,9 @@ if ($action !== 'record') jsonOut(['ok' => false, 'error' => 'Unknown action'], 
 
 if (!$res['ok']) jsonOut($res, 422);
 
-$open = currentOpenOrder();
+// activeScanOrder(), so a helper station records into the order it is
+// assisting instead of being told to start one of its own.
+$open = activeScanOrder();
 if (!$open) jsonOut(['ok' => false, 'error' => 'No order is open. Tap START ORDER first.'], 409);
 
 $db = getDB();
@@ -109,13 +128,14 @@ if ($res['kind'] === 'produce' && !empty($res['needs_weight'])) {
     $qty = isset($in['quantity']) ? max(1, (int)$in['quantity']) : 1;
 }
 
+$station = currentStationId();
 $ins = $db->prepare(
-    "INSERT INTO scans (order_id, barcode, generic_name, kind, quantity, weight_lbs, scanned_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)"
+    "INSERT INTO scans (order_id, barcode, generic_name, kind, quantity, weight_lbs, scanned_at, station)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 );
 $ins->execute([
     $open['id'], $barcode, $res['generic_name'], $res['kind'],
-    $qty, $weight, now()
+    $qty, $weight, now(), $station
 ]);
 $scanId = (int)$db->lastInsertId();
 
@@ -136,6 +156,10 @@ jsonOut([
         'quantity' => $qty,
         'weight_lbs' => $weight,
         'barcode' => $barcode,
+        // So the row renders with its station badge right away, without
+        // waiting for the next sync poll to redraw the table.
+        'station' => $station,
+        'station_label' => orderStations((int)$open['id'])[$station] ?? '',
         'brand_name' => $res['brand_name'] ?? null,
         'source' => $res['source'] ?? null,
     ],

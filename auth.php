@@ -8,6 +8,13 @@
 //   requireAllowedIP() — 403s if REMOTE_ADDR doesn't match `allowed_ip`
 //                        in the same settings store. Empty value = no
 //                        restriction (lets you set it up first).
+//
+// Two passwords open the same doors. `admin_password` is the administrator
+// login. `supervisor_password` (optional, Settings -> "Supervisor Password")
+// grants the identical run of pages and APIs, with one deliberate difference:
+// the Settings page itself is read-only for a supervisor apart from the
+// Public IPv4 Address controls. See fpAuthRole() / fpIsSupervisor(); the
+// Settings page enforces the restriction server-side.
 
 require_once __DIR__ . '/crypto.php';    // fpVerifyAdminPassword, fsScheduleAllowsNow
 require_once __DIR__ . '/ratelimit.php'; // progressive login throttle + soft-lock
@@ -40,6 +47,48 @@ function fpClearAuthCookie(): void {
     unset($_COOKIE[AUTH_COOKIE]);
 }
 
+// ── Supervisor password ──────────────────────────────────────────────────
+// A second shared password that logs in with the same reach as the admin one.
+// Unset (empty) means the feature is simply off — unlike admin_password there
+// is no 'admin' fallback, so an install that never sets one cannot be entered
+// with a guessed default.
+
+// The value as STORED (a password_hash). Also the seed for the auth cookie
+// token, so a rotation invalidates every supervisor session.
+function fpSupervisorStored(): string {
+    return (string)(setting('supervisor_password', '') ?? '');
+}
+
+function fpSupervisorEnabled(): bool {
+    return fpSupervisorStored() !== '';
+}
+
+function fpVerifySupervisorPassword(string $submitted): bool {
+    $stored = fpSupervisorStored();
+    return $stored !== '' && fpVerifyAdminPassword($submitted, $stored);
+}
+
+// Which password the current auth cookie was issued for: 'admin',
+// 'supervisor', or '' when the cookie is missing/stale. Admin is tested first,
+// so if both passwords were somehow set to the same text the session is the
+// more privileged one rather than silently the lesser.
+function fpAuthRole(): string {
+    $cookie = $_COOKIE[AUTH_COOKIE] ?? '';
+    if ($cookie === '') return '';
+    if (hash_equals(fpMakeAuthToken((string)(setting('admin_password', 'admin') ?? 'admin')), $cookie)) {
+        return 'admin';
+    }
+    $sup = fpSupervisorStored();
+    if ($sup !== '' && hash_equals(fpMakeAuthToken($sup), $cookie)) return 'supervisor';
+    return '';
+}
+
+// True when the visitor is logged in with the supervisor password. Pages use
+// this to withhold the few things a supervisor may not change.
+function fpIsSupervisor(): bool {
+    return fpAuthRole() === 'supervisor';
+}
+
 function requireLogin(): void {
     $password = setting('admin_password', 'admin') ?? 'admin';
 
@@ -58,15 +107,23 @@ function requireLogin(): void {
         if ($gate['mode'] === 'wait') {
             $loginError = 'Too many failed attempts. ' . fpThrottleWaitText($gate['wait']);
         } else {
-            $passOk = fpVerifyAdminPassword($_POST['fp_login_password'] ?? '', $password);
+            $submitted = (string)($_POST['fp_login_password'] ?? '');
+            $passOk    = fpVerifyAdminPassword($submitted, $password);
+            // Whichever password matched also seeds the cookie, which is how
+            // later requests tell an admin session from a supervisor one.
+            $seed      = $password;
+            if (!$passOk && fpVerifySupervisorPassword($submitted)) {
+                $passOk = true;
+                $seed   = fpSupervisorStored();
+            }
             $otpOk  = ($gate['mode'] !== 'otp')
                    || fpLoginOtpCheck($ip, trim((string)($_POST['fp_login_otp'] ?? '')));
             if ($passOk && $otpOk) {
                 fpLoginRecordSuccess($ip);
-                // Cookie token is derived from the stored value ($password =
-                // the hash), so it persists across requests and
-                // auto-invalidates when the password (hash) changes.
-                fpSetAuthCookie($password, FP_COOKIE_TTL);
+                // Cookie token is derived from the stored value ($seed = the
+                // hash), so it persists across requests and auto-invalidates
+                // when that password (hash) changes.
+                fpSetAuthCookie($seed, FP_COOKIE_TTL);
                 header('Location: ' . $_SERVER['REQUEST_URI']);
                 exit;
             }
@@ -81,6 +138,12 @@ function requireLogin(): void {
         fpSetAuthCookie($password, FP_COOKIE_TTL); // sliding renewal
         return;
     }
+    // Same sliding renewal for a supervisor session, seeded from the
+    // supervisor hash so the renewal doesn't promote it to an admin cookie.
+    if (fpSupervisorEnabled() && fpIsAuthenticated(fpSupervisorStored())) {
+        fpSetAuthCookie(fpSupervisorStored(), FP_COOKIE_TTL);
+        return;
+    }
     // Rendering the wall is the one moment a soft-locked IP may trigger the
     // (paced) security-code email — see fpLoginGate's $allowSend.
     renderLoginWall($loginError, fpLoginGate($ip, true));
@@ -89,8 +152,8 @@ function requireLogin(): void {
 
 function requireLoginAPI(): void {
     // JSON variant for AJAX endpoints — returns 401 instead of redirect.
-    $password = setting('admin_password', 'admin') ?? 'admin';
-    if (!fpIsAuthenticated($password)) {
+    // Either password is accepted, matching the page-level gate.
+    if (fpAuthRole() === '') {
         http_response_code(401);
         header('Content-Type: application/json');
         echo json_encode(['ok' => false, 'error' => 'Login required']);
@@ -245,7 +308,7 @@ function renderLoginWall(?string $error, array $gate = ['mode' => 'open', 'wait'
     </style></head><body>
     <div class="login-card">
       <h1>⚙ OpenPantry Admin</h1>
-      <p>Enter the administrator password to continue.</p>
+      <p>Enter the <?= fpSupervisorEnabled() ? 'administrator or supervisor' : 'administrator' ?> password to continue.</p>
       <?php if ($error): ?>
         <div class="error">⚠ <?= htmlspecialchars($error) ?></div>
       <?php endif; ?>

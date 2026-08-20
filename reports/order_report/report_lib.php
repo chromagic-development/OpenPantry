@@ -41,6 +41,94 @@ function op_convert_qty(float $qty, string $from, string $to, float $lbPerEach):
     return null;  // unit outside {each, lb} — nothing sensible to do
 }
 
+// Vendor-facing figures for one item: the crossover from the unit the pantry
+// stocks it in to the unit the vendor quotes, the whole cases that covers, what
+// those cases put back on the shelf, and the floor space both take up.
+//
+// Split out of op_report_rows() because two row builders need it — items with a
+// demand history, and (when the report is asked for them) inventory items with
+// none. The conversions are fiddly enough that a second copy would drift, and a
+// drift here means an order email that disagrees with the inventory it books in.
+//
+//   $invRow       : the item's inventory row, or null if it has none.
+//   $unitFallback : unit to assume when inventory doesn't name one.
+//   $orderReq     : the request, in the pantry's own unit.
+//   $effStock     : on-hand count the caller is working from (0 under
+//                   "Ignore In Stock"), also in the pantry's own unit.
+function op_order_figures(?array $invRow, string $unitFallback, float $orderReq, float $effStock): array {
+    $unit      = (string)($invRow['unit'] ?? $unitFallback);
+    $lbPerEach = (float)($invRow['lb_per_each'] ?? 0);
+    $orderUnit = (string)($invRow['order_unit'] ?? '');
+    // A half-configured item (order unit set, average weight missing or a junk
+    // unit stored) falls back to the stock unit — the original behaviour —
+    // rather than producing a case count nobody can trust. inventory.php warns
+    // on save when that happens.
+    $orderQty  = ($orderUnit === 'each' || $orderUnit === 'lb')
+               ? op_convert_qty($orderReq, $unit, $orderUnit, $lbPerEach)
+               : null;
+    if ($orderQty === null) {
+        $orderUnit = $unit;
+        $orderQty  = $orderReq;
+    }
+
+    $cpc = (float)($invRow['count_per_case'] ?? 0);
+    // count_per_case is in the order unit, so the ceil to whole cases lands on
+    // vendor units — 5.25 cases of avocados becomes 6, never 5.
+    $cases = ($cpc > 0 && $orderQty > 0) ? (int)ceil($orderQty / $cpc) : 0;
+    // What those cases actually add to the shelf, back in the stock unit.
+    // Restock Now posts this, so a 6 × 48-count case order books in as 144 lb
+    // rather than 288 of anything.
+    $restockQty = $cpc > 0
+        ? (op_convert_qty($cases * $cpc, $orderUnit, $unit, $lbPerEach) ?? ($cases * $cpc))
+        : $orderReq;
+
+    // Floor space, in cubic feet (Inventory → Cu Ft/Case).
+    // Both figures need a case size to divide by as well as the factor itself,
+    // so a half-configured item contributes 0 and is counted as unconfigured by
+    // the report instead of being read as taking no room.
+    $cratesPer   = (float)($invRow['crates_per_case'] ?? 0);
+    $hasCrates   = ($cratesPer > 0 && $cpc > 0);
+    $orderCrates = $hasCrates ? $cases * $cratesPer : 0.0;
+    // What the pantry already holds, in the same cubic feet — shelf plus
+    // anything in transit, since a delivery is booked in with Restock Now when
+    // it is ordered rather than when it lands. Stock crosses into the order unit
+    // exactly as the request does above, then divides by the case size to reach
+    // a case-equivalent. The caller passes $effStock rather than the raw count
+    // so "Ignore In Stock" stays self-consistent: that mode asks what a full par
+    // would need on an empty floor, and a capacity total still counting the real
+    // shelf would answer a different question.
+    $stockCrates = 0.0;
+    if ($hasCrates && $effStock > 0) {
+        $stockOrderQty = op_convert_qty($effStock, $unit, $orderUnit, $lbPerEach);
+        if ($stockOrderQty !== null) {
+            $stockCrates = ($stockOrderQty / $cpc) * $cratesPer;
+        }
+    }
+
+    return [
+        'unit'        => $unit,
+        'cpc'         => $cpc,
+        'cases'       => $cases,
+        // The vendor's own wording for the pack, from the Inventory page's Alt
+        // Case field. '' = use the plain word "case(s)".
+        'alt_case'    => (string)($invRow['alt_case'] ?? ''),
+        // 'order_unit' equals 'unit' and 'order_qty' equals the request whenever
+        // no separate order unit is configured, so consumers can use these
+        // unconditionally.
+        'order_unit'  => $orderUnit,
+        'lb_per_each' => $lbPerEach,
+        'order_qty'   => $orderQty,
+        'restock_qty' => $restockQty,
+        // 'has_crates' is false when either half of the conversion is missing,
+        // which is what the report counts to warn that its total is a lower
+        // bound rather than the whole picture.
+        'crates_per_case' => $cratesPer,
+        'has_crates'      => $hasCrates,
+        'order_crates'    => $orderCrates,
+        'stock_crates'    => $stockCrates,
+    ];
+}
+
 // Days the pantry operated but nothing was scanned, as a ['Y-m-d' => true] set
 // (see the unscanned_days table in schema.sql). The demand model treats these
 // as unobserved rather than as zero demand, so a missed scanning day no longer
@@ -116,7 +204,11 @@ function op_open_dow(array $hist): array {
 //
 // $opts keys (all optional, sensible defaults from Settings):
 //   lead_time, velocity_window, z, ignore_stock, ignore_events,
-//   produce_only, purchased_only
+//   produce_only, purchased_only, include_unscanned
+//
+// Rows normally come from the scan history — an item the pantry has never
+// scanned has no demand to model, so it has no row. include_unscanned adds those
+// inventory items back as zero-demand rows so they can still be ordered by hand.
 //
 // Each returned row has the same shape order_report.php's table expects, incl.
 // 'days_left' (projected days of stock) used for alert evaluation.
@@ -132,6 +224,9 @@ function op_report_rows(PDO $db, array $opts = []): array {
     $ignoreEvents  = (bool)($opts['ignore_events']          ?? true);
     $produceOnly   = (bool)($opts['produce_only']           ?? false);
     $purchasedOnly = (bool)($opts['purchased_only']         ?? false);
+    // Default off keeps every existing caller — the page's saved settings and
+    // the cron mailer both — on the pure forecast they get today.
+    $includeUnscanned = (bool)($opts['include_unscanned']   ?? false);
 
     $today = new DateTimeImmutable('today');
 
@@ -164,8 +259,12 @@ function op_report_rows(PDO $db, array $opts = []): array {
         $hist[$r['generic_name']][$r['day']] = $amt;
     }
 
+    // Guard the SELECT below against a partial deploy that brought this file up
+    // without db.php's matching migration.
+    op_ensure_inventory_crates_column($db);
+
     $inv = [];
-    foreach ($db->query("SELECT generic_name, count, unit, count_per_case, order_unit, lb_per_each, alt_case, restocked_purchased FROM inventory") as $r) {
+    foreach ($db->query("SELECT generic_name, count, unit, count_per_case, order_unit, lb_per_each, alt_case, crates_per_case, restocked_purchased FROM inventory") as $r) {
         $inv[$r['generic_name']] = $r;
     }
 
@@ -259,40 +358,17 @@ function op_report_rows(PDO $db, array $opts = []): array {
 
         // Everything above — demand, par, order request — is denominated in the
         // unit the pantry stocks and scans the item in. The vendor may quote its
-        // case in the other one, so the case maths crosses over here and back
-        // again for the restock, and only here.
-        $unit = $inv[$name]['unit'] ?? ($kinds[$name] === 'produce' ? 'lb' : 'each');
-        $lbPerEach = (float)($inv[$name]['lb_per_each'] ?? 0);
-        $orderUnit = (string)($inv[$name]['order_unit'] ?? '');
-        // A half-configured item (order unit set, average weight missing or a
-        // junk unit stored) falls back to the stock unit — today's behaviour —
-        // rather than producing a case count nobody can trust. inventory.php
-        // warns on save when that happens.
-        $orderQty  = ($orderUnit === 'each' || $orderUnit === 'lb')
-                   ? op_convert_qty($orderReq, $unit, $orderUnit, $lbPerEach)
-                   : null;
-        if ($orderQty === null) {
-            $orderUnit = $unit;
-            $orderQty  = $orderReq;
-        }
-
-        $cpc   = (float)($inv[$name]['count_per_case'] ?? 0);
-        // count_per_case is in the order unit, so the ceil to whole cases lands
-        // on vendor units — 5.25 cases of avocados becomes 6, never 5.
-        $cases = ($cpc > 0 && $orderQty > 0) ? (int)ceil($orderQty / $cpc) : 0;
-        // What those cases actually add to the shelf, back in the stock unit.
-        // Restock Now posts this, so a 6 × 48-count case order books in as
-        // 144 lb rather than 288 of anything.
-        $restockQty = $cpc > 0
-            ? (op_convert_qty($cases * $cpc, $orderUnit, $unit, $lbPerEach) ?? ($cases * $cpc))
-            : $orderReq;
+        // case in the other one, so the case maths crosses over in
+        // op_order_figures() and back again for the restock, and only there.
+        $fig = op_order_figures($inv[$name] ?? null,
+                                $kinds[$name] === 'produce' ? 'lb' : 'each',
+                                $orderReq, $effStock);
 
         $catKind = isset($produceNamesLc[strtolower($name)]) ? 'produce' : $kinds[$name];
 
-        $rows[] = [
+        $rows[] = $fig + [
             'name'    => $name,
             'kind'    => $catKind,
-            'unit'    => $unit,
             'adv'     => $adv,
             'sigma'   => $sigma,
             'safety'  => $safety,
@@ -301,21 +377,54 @@ function op_report_rows(PDO $db, array $opts = []): array {
             'par'     => $par,
             'stock'   => $stock,
             'order'   => $orderReq,
-            'cpc'     => $cpc,
-            'cases'   => $cases,
-            // The vendor's own wording for the pack, from the Inventory page's
-            // Alt Case field. '' = use the plain word "case(s)".
-            'alt_case' => (string)($inv[$name]['alt_case'] ?? ''),
-            // Vendor-facing figures. 'order_unit' equals 'unit' and 'order_qty'
-            // equals 'order' whenever no separate order unit is configured, so
-            // consumers can use these unconditionally.
-            'order_unit'  => $orderUnit,
-            'lb_per_each' => $lbPerEach,
-            'order_qty'   => $orderQty,
-            'restock_qty' => $restockQty,
             'purchased' => (float)($inv[$name]['restocked_purchased'] ?? 0),
             'days_left' => $adv > 0 ? ($stock / $adv) : INF,
         ];
+    }
+
+    // Inventory items that have never been scanned. There is no demand signal
+    // behind them, so there is nothing to forecast and nothing to recommend —
+    // they are listed purely so they can be ordered by hand, which the Order
+    // Request column allows on any row with nothing to recommend.
+    //
+    // Off unless asked for, and deliberately so: this report is a forecast, and
+    // on a real install these run to dozens of rows (stock the pantry holds but
+    // has never distributed through the scanner) that would bury the items
+    // actually needing attention. 'method' marks them so the page can show the
+    // model columns as blank rather than as a fitted zero, and days_left stays
+    // INF so a reorder alert on one can never fire on no evidence.
+    if ($includeUnscanned) {
+        foreach ($inv as $name => $invRow) {
+            if (isset($hist[$name])) continue;
+            // Scanned rows take their kind from the scan and are only promoted
+            // to produce by the lookup; with no scan, the lookup is the only
+            // evidence there is, so an item the pantry treats as produce but
+            // has never added to Produce Lookup types as packaged and stays
+            // hidden under Produce Only. Adding it to the lookup fixes it —
+            // there is nothing else here to infer it from (inventory has no
+            // kind column, and the unit doesn't tell you: rat food is 'lb').
+            $catKind  = isset($produceNamesLc[strtolower($name)]) ? 'produce' : 'packaged';
+            $stock    = (float)($invRow['count'] ?? 0);
+            $effStock = $ignoreStock ? 0.0 : $stock;
+            // No history means no par level, so max(0, 0 - stock) is 0 — the
+            // request can only ever be the one typed into the page.
+            $fig = op_order_figures($invRow, $catKind === 'produce' ? 'lb' : 'each',
+                                    0.0, $effStock);
+            $rows[] = $fig + [
+                'name'    => $name,
+                'kind'    => $catKind,
+                'adv'     => 0.0,
+                'sigma'   => 0.0,
+                'safety'  => 0.0,
+                'S'       => 1.0, 'G' => 1.0,
+                'method'  => 'unscanned',
+                'par'     => 0.0,
+                'stock'   => $stock,
+                'order'   => 0.0,
+                'purchased' => (float)($invRow['restocked_purchased'] ?? 0),
+                'days_left' => INF,
+            ];
+        }
     }
 
     usort($rows, function($a, $b) {
@@ -333,6 +442,27 @@ function op_report_rows(PDO $db, array $opts = []): array {
         }));
     }
     return $rows;
+}
+
+// Ensure inventory.crates_per_case exists, adding it if a stale db.php skipped
+// the migration. Same safety net, and the same reason, as the alerts column
+// below: this file and db.php are deployed as separate uploads, so a run that
+// copies up the new report but not the new db.php would otherwise fatal on the
+// inventory SELECT ("no such column") and take the whole Order Report with it.
+// Cached per request so the PRAGMA check runs at most once.
+function op_ensure_inventory_crates_column(PDO $db): void {
+    static $ensured = false;
+    if ($ensured) return;
+    $ensured = true;
+    try {
+        foreach ($db->query("PRAGMA table_info(inventory)") as $c) {
+            if (($c['name'] ?? '') === 'crates_per_case') return;
+        }
+        $db->exec("ALTER TABLE inventory ADD COLUMN crates_per_case REAL NOT NULL DEFAULT 0");
+    } catch (\Throwable $e) {
+        // Concurrent add, or a read-only DB — leave it; the SELECT will surface
+        // any real problem. Nothing else we can safely do here.
+    }
 }
 
 // Ensure alerts.email_enabled exists, adding it if a stale db.php skipped the

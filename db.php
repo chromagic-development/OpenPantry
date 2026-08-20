@@ -14,12 +14,20 @@ function getDB(): PDO {
     $db = new PDO('sqlite:' . $path);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    $db->exec('PRAGMA foreign_keys = ON');
-    $db->exec('PRAGMA journal_mode = WAL');
     // With multiple scanning stations writing concurrently, two single-row
     // inserts can momentarily contend for SQLite's write lock. Wait up to 5s
-    // for the lock instead of failing immediately with SQLITE_BUSY.
+    // for the lock instead of failing immediately with SQLITE_BUSY. This has to
+    // be set before any pragma that can itself need a lock — until it is, SQLite
+    // returns SQLITE_BUSY instantly with no retry at all.
     $db->exec('PRAGMA busy_timeout = 5000');
+    $db->exec('PRAGMA foreign_keys = ON');
+    // Only *assign* journal_mode when it is actually wrong. Reading it takes no
+    // lock, but converting a file to WAL needs an exclusive one — unobtainable
+    // while any other connection is open. Once set, WAL is persistent in the
+    // database header, so on a healthy install this branch never runs.
+    if (strtolower((string)$db->query('PRAGMA journal_mode')->fetchColumn()) !== 'wal') {
+        $db->exec('PRAGMA journal_mode = WAL');
+    }
 
     $schema = file_get_contents(__DIR__ . '/schema.sql');
     $db->exec($schema);
@@ -39,7 +47,9 @@ function getDB(): PDO {
     migrateAddInventoryCountPerCase($db);
     migrateAddInventoryOrderUnit($db);
     migrateAddInventoryAltCase($db);
+    migrateAddInventoryCratesPerCase($db);
     migrateAddOrderStation($db);
+    migrateAddScanStation($db);
     migrateAddAlertEmailEnabled($db);
     // Convert a stored plaintext (or previously-encrypted) admin_password into
     // a one-way hash. Runs before the field-encryption migration so the latter
@@ -199,6 +209,19 @@ function migrateAddInventoryAltCase(PDO $db): void {
     $db->exec("ALTER TABLE inventory ADD COLUMN alt_case TEXT NOT NULL DEFAULT ''");
 }
 
+// Adds inventory.crates_per_case (0 = not set), how many cubic feet one
+// supplier case takes up on the floor. Entered on the Inventory page and summed
+// by the Order Report against the max_storage_crates setting. Default 0 leaves
+// every existing row unconfigured, so the capacity total reads 0 and warns
+// about nothing until an admin fills the column in.
+function migrateAddInventoryCratesPerCase(PDO $db): void {
+    $cols = $db->query("PRAGMA table_info(inventory)")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($cols as $c) {
+        if (($c['name'] ?? '') === 'crates_per_case') return;
+    }
+    $db->exec("ALTER TABLE inventory ADD COLUMN crates_per_case REAL NOT NULL DEFAULT 0");
+}
+
 // Adds delivery_clients.volunteer (default '') for the optional "volunteer
 // assigned to the client" field on client.php. Existing rows get an empty
 // string, which renders as blank everywhere it's surfaced.
@@ -228,6 +251,18 @@ function migrateAddOrderStation(PDO $db): void {
     // just gained it above. CREATE INDEX is omitted from schema.sql because it
     // runs before this migration, when the column may not exist yet.
     $db->exec("CREATE INDEX IF NOT EXISTS idx_orders_station ON orders(status, station)");
+}
+
+// Adds scans.station (default '') so a team-scanned order can show which
+// station entered each row. Existing scans keep '' — they predate team
+// scanning, and so do the delivery / event / orderahead channels, which insert
+// scans directly with no station. The UI treats '' as "unattributed".
+function migrateAddScanStation(PDO $db): void {
+    $cols = $db->query("PRAGMA table_info(scans)")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($cols as $c) {
+        if (($c['name'] ?? '') === 'station') return;
+    }
+    $db->exec("ALTER TABLE scans ADD COLUMN station TEXT NOT NULL DEFAULT ''");
 }
 
 // Adds alerts.email_enabled (default 0) on installs created before reorder
@@ -280,6 +315,10 @@ function seedSettings(PDO $db): void {
         'default_lead_time'=> '14',     // days
         'safety_z'         => '1.65',   // 95% confidence
         'velocity_window'  => '30',     // trailing days for avg daily velocity
+        // Cubic feet of storage the pantry can hold. 0 = no limit set, which is
+        // what existing installs read via setting()'s default — the Order Report
+        // then shows the cu ft total without comparing it to anything.
+        'max_storage_crates' => '0',
         'admin_password'   => 'admin',  // shared login (FoodScan + PantryPrep)
         'allowed_ip'       => '',       // single allowed IPv4; empty = no gate
         'admin_email'      => '',       // where reorder-reminder emails are sent

@@ -42,6 +42,20 @@ whole picture.
   number and start/end timestamps; closing it deducts the scanned quantities
   from inventory. Multiple scanning **stations** can each hold their own open
   order at once (tracked by a per-device cookie).
+- **Team scanning.** Two operators can check the same household out together.
+  An idle station shows an **Another station is scanning** card listing the
+  open orders elsewhere in the pantry; tapping **+ Assist** joins one, and from
+  then on that station's scans land in the shared order. Ownership doesn't
+  move: only the station that started the order can **End** or **Cancel** it,
+  and the helper gets a **Leave Assist** button instead. Both screens stay in
+  step through a 2.5-second poll, so a scan on one appears on the other without
+  a refresh, and either operator can pull a mis-scan back out — including one
+  their teammate entered. Once a second station joins, a **Who** column appears
+  in the item list badging each row with the station that scanned it (filled
+  badge = this station, outline = the teammate's); it stays hidden on a
+  single-station pantry, as does the whole Assist card. Ending or cancelling
+  the order releases the helpers back to idle. A common use is a volunteer's
+  phone in camera mode assisting the wired laser station on a busy day.
 - **Generic-name normalization.** Scanned UPCs are stored only as their
   *generic* food name (e.g. `Black Beans`), never the brand, so demand
   aggregates cleanly. The first time a UPC is seen, OpenPantry queries
@@ -77,6 +91,13 @@ All of these draw from the same inventory pool:
 - **Daily Volume** — orders and scans per day.
 - **Basket Size** — distribution of items-per-order for in-pantry trips
   (evidence on whether unrationed access leads to larger baskets over time).
+- **Impact** — the funder/board view, and the only report that reads *both*
+  databases. Pounds distributed and meals provided, households and people
+  reached, service channels, top items, donated-vs-purchased sourcing, and
+  (from `picklist.db`) counter requests with their fill rate. Weighed produce
+  is real; packaged goods are counted, so any pound or meal figure uses the
+  average-item-weight and pounds-per-meal assumptions set at the top of the
+  page and restated in the report's Methodology card. No client PII appears.
 
 ### 4. The demand model (Order Now report)
 
@@ -119,6 +140,16 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
   single cookie. The password is stored **one-way hashed** (`password_hash`) —
   even the running app can't recover it. Default password is `admin`; change it
   under **Settings** immediately.
+- **Supervisor login** (optional, Settings → 🔑 Supervisor Password). A second
+  shared password, hashed the same way, that opens every page and report the
+  admin password does — with one exception: the **Settings** page is read-only
+  for a supervisor apart from the **Public IPv4 Address** controls (*Use My
+  Current IP* / *Set IP Address*). It's for whoever opens the pantry: they can
+  re-point the network gate at today's WiFi address without holding the keys to
+  the OpenAI key, the mail settings, or the passwords. Setting or removing it
+  takes the current administrator password, and doing so signs out anyone using
+  the old one (the cookie token derives from the stored hash). Unset = the role
+  doesn't exist; there is no default supervisor password.
 - **Login rate limiting** (`ratelimit.php`). Failed logins are throttled per
   IP with progressive delays (10s after the 3rd failure, 30s after the 4th).
   The 5th failure **soft-locks** the IP: a single-use 6-digit code is emailed
@@ -133,8 +164,8 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
   Both live in `auth.php`; leave the IP blank to allow all.
 - **Field-level encryption.** PII security and privacy is paramount.
   Sensitive columns are encrypted at rest with libsodium (`crypto.php`):
-  **every `settings` value** (the hashed `admin_password` and a migration
-  flag excepted) and delivery clients' `address` / `city` / `phone`. The
+  **every `settings` value** (the hashed `admin_password` /
+  `supervisor_password` and a migration flag excepted) and delivery clients' `address` / `city` / `phone`. The
   32-byte key lives in `encryption_key.php`, generated on first use.
 
   > ⚠️ **Back up `encryption_key.php` and keep it out of version control.**
@@ -161,17 +192,16 @@ openpantry/
 ├── db.php             library: PDO + first-run seed + idempotent migrations
 ├── auth.php           library: shared login + IP/time access gate
 ├── crypto.php         library: field-level encryption + password hashing
-├── common.php         library: header/nav/styles + station cookie
+├── common.php         library: header/nav/styles + station cookie + team scanning
 ├── lookup.php         library: barcode → generic name (OFF + OpenAI)
 ├── mailer.php         library: dependency-free SMTP / mail() sender
-├── api_order.php      JSON: start/end/cancel orders
+├── api_order.php      JSON: start/end/cancel orders + assist join/leave/sync
 ├── api_scan.php       JSON: lookup / record / delete a scan
 ├── api_alert.php      JSON: reorder-alert CRUD + email toggle
 ├── api_openai_test.php       JSON: smoke-test the OpenAI key
 ├── api_send_test_email.php   JSON: send a test reorder reminder
 ├── cron_reorder_alerts.php   cron: email triggered reorder reminders
-├── scan/              page: laser scanner
-├── scan_camera/       page: html5-qrcode camera scanner
+├── scan/              page: scanning station (laser scanner + phone camera)
 ├── inventory/         page: manual current-count entry
 ├── restock/           page: batch add-to-inventory
 ├── delivery/          app:  delivery kiosk + client manager + printing
@@ -182,7 +212,8 @@ openpantry/
 │   ├── orders_listing_report/   page: orders & items by date range
 │   ├── usage_report/            page: per-item totals by date range
 │   ├── volume_report/           page: orders & scans per day
-│   └── basket_report/           page: basket-size distribution
+│   ├── basket_report/           page: basket-size distribution
+│   └── impact_report/           page: impact summary (both databases)
 ├── lookup_admin/      page: manage produce + UPC mappings
 ├── settings/          page: OpenAI key, par defaults, network access, admin email/password, SMTP
 ├── logout/            page: clears auth cookie
@@ -193,7 +224,7 @@ openpantry/
     ├── db.php            PDO + first-run schema/seed for picklist.db
     ├── admin/            page: configure order-form items (password protected)
     ├── orders/           page: live employee pick-queue dashboard
-    ├── report/           page: item-usage reports + chart
+    ├── reports/          pages: item-usage report + chart, daily volume
     └── deduplicate/      page: merge duplicate item rows
 ```
 
@@ -221,9 +252,11 @@ below.
    (`admin`)**. Optionally set the administrator email and SMTP details.
 6. **Scan.** Open `/openpantry/scan/` on a tablet wired to the handheld
    scanner. Tap anywhere on the page to keep focus in the barcode field — the
-   scanner types digits + Enter and the page does the rest. For phones without
-   a wired scanner, use `/openpantry/scan_camera/` (needs camera permission and
-   HTTPS or localhost).
+   scanner types digits + Enter and the page does the rest. On a device with no
+   wired scanner, tap **Start Camera** on the same page to scan with the
+   device's camera instead (needs camera permission and HTTPS or localhost).
+   To put a second person on the same household, open the same page on their
+   device and tap **+ Assist** on the order already running.
 7. **Customer ordering** lives at `/openpantry/menucounter/`; the employee pick
    queue is at `/openpantry/menucounter/orders/`.
 8. **(Optional) Reorder-reminder cron.** Add a cron job that runs the mailer on
@@ -252,6 +285,31 @@ laser scanner and VEVOR Industrial Scale that includes a RS-232 to USB HID
 interface to automatically enter produce weight in pounds (e.g. 1.120lb).
 Alternatively, all PLU/UPC codes and weights can be entered manually and there
 is a camera option available instead of requiring a laser scanner.
+
+The scale sends nothing until a reading settles, and it sends that reading once
+per weighing cycle — there is no continuous stream and no motion/stable flag in
+the data. A weighed produce entry is therefore two halves, a PLU and a weight,
+and **the scan station accepts them in either order with nothing to configure**.
+It tells them apart by what arrives: the scale types decimal pounds with an `lb`
+suffix, a PLU is bare digits, and nothing else on the page looks like either.
+
+- **Scan the PLU first** — the “Weight required” window opens and the scale (or
+  the keypad) fills it in.
+- **Weigh first** — set the item on the scale and leave it alone. When it
+  settles the scale transmits on its own; the station holds the reading, beeps,
+  and asks for the PLU. Scan the code and both halves are recorded together.
+
+Either way, **clear the platform afterwards**: the scale only arms the next
+transmission once it returns to zero. Weighing first needs the scale in “PC”
+mode (press `.` then `9`) rather than “print” mode; in “print” mode it sends
+only when the PRINT key is pressed, which still lands in the “Weight required”
+window if that is open.
+
+Volunteers can switch between the two orders mid-order without telling the app,
+and the manual keypad fallback always works, so an unplugged scale doesn't stop
+the station. A weight the scale sends twice for one item is recognized as an
+echo and ignored, and a scale left in kilograms is refused outright rather than
+recorded as pounds.
 
 ## Open Food Facts notes
 

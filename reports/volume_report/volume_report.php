@@ -10,10 +10,47 @@ $db = getDB();
 
 date_default_timezone_set('America/New_York');
 
+// Start Date is sticky: the last one the user ran the report with is kept in a
+// cookie and becomes the default next visit. Only an explicit submission writes
+// it, so a report nobody has filtered keeps rolling forward on the trailing
+// month rather than freezing on whatever the first load happened to compute.
+// Reset clears it. Cookie name is report-specific so the two volume reports
+// don't overwrite each other; path '/' matches fp_admin_auth and fs_station.
+define('VR_START_COOKIE', 'fp_volrep_start');
+
+// Both the cookie and the query string are user-controlled, and a value
+// strtotime() can't parse would leave the zero-fill loop below starting from
+// 1970 and running for decades of rows, so everything goes through this first.
+function vrValidDate($v): bool {
+    if (!is_string($v) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) return false;
+    $d = DateTime::createFromFormat('Y-m-d', $v);
+    return $d !== false && $d->format('Y-m-d') === $v;
+}
+
+// Must run before any output — this both sets a cookie and redirects.
+if (isset($_GET['reset'])) {
+    @setcookie(VR_START_COOKIE, '', time() - 3600, '/');
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+    exit;
+}
+
 $defaultEnd   = date('Y-m-d');
-$defaultStart = date('Y-m-d', strtotime('-30 days'));
-$dateStart = $_GET['date_start'] ?? $defaultStart;
-$dateEnd   = $_GET['date_end']   ?? $defaultEnd;
+$defaultStart = date('Y-m-d', strtotime('-1 month'));
+
+$savedStart = $_COOKIE[VR_START_COOKIE] ?? '';
+if (vrValidDate($savedStart)) $defaultStart = $savedStart;
+
+$userStart = isset($_GET['date_start']) && vrValidDate($_GET['date_start'])
+    ? $_GET['date_start'] : null;
+
+$dateStart = $userStart ?? $defaultStart;
+$dateEnd   = isset($_GET['date_end']) && vrValidDate($_GET['date_end'])
+    ? $_GET['date_end'] : $defaultEnd;
+
+if ($userStart !== null) {
+    @setcookie(VR_START_COOKIE, $userStart, time() + 365 * 24 * 3600, '/');
+    $_COOKIE[VR_START_COOKIE] = $userStart;
+}
 
 // End-date is inclusive of the entire selected day, so a Start=End=04/16
 // filter returns every scan from 00:00:00 through 23:59:59 on 04/16.
@@ -97,7 +134,7 @@ renderNav('volume');
       </div>
       <div class="row" style="margin-top:14px;">
         <button type="submit" class="btn btn-primary" style="flex:0 0 160px;">📅 Run Report</button>
-        <a href="" class="btn btn-secondary" style="flex:0 0 100px; text-align:center; text-decoration:none;">↺ Reset</a>
+        <a href="?reset=1" class="btn btn-secondary" style="flex:0 0 100px; text-align:center; text-decoration:none;">↺ Reset</a>
         <?php if ($hasData): ?>
           <button type="button" class="btn btn-secondary" style="flex:0 0 100px;" onclick="window.print()">🖨 Print</button>
         <?php endif; ?>

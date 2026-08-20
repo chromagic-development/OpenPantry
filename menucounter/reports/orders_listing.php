@@ -3,14 +3,10 @@ require_once '../db.php';
 $db = getDB();
 
 // ── Auth gate: same persistent cookie as admin.php ───────────────────────────
-function makeAuthToken($password) {
-    return hash('sha256', 'fp_admin_' . $password);
-}
+// Accepts either the administrator or the supervisor password — both mint the
+// cookie, and both open this page. See foodscanAuthCookieValid() in ../db.php.
 function isAuthenticated($db) {
-    // admin_password lives in openpantry.db (see foodscanSetting() in ../db.php).
-    $pw = foodscanSetting('admin_password', 'admin');
-    $cookie = $_COOKIE['fp_admin_auth'] ?? '';
-    return $cookie !== '' && hash_equals(makeAuthToken($pw), $cookie);
+    return foodscanAuthCookieValid();
 }
 if (!isAuthenticated($db)) {
     header('Location: ../admin/admin.php');
@@ -222,7 +218,7 @@ $orderCount = (int)$oStmt->fetchColumn();
   <div class="header-actions">
     <a href="../orders/">← Orders</a>
     <a href="../admin/">⚙ Manage Items</a>
-    <a href="../report/volume/">📅 Daily Volume</a>
+    <a href="../reports/volume/">📅 Daily Volume</a>
     <a href="../admin/?logout=1">🔒 Log Out</a>
   </div>
 </header>
@@ -269,7 +265,7 @@ $orderCount = (int)$oStmt->fetchColumn();
     </div>
     <div class="filter-footer">
       <button type="submit" class="btn btn-brown">📊 Run Report</button>
-      <a href="../report/" class="btn btn-outline">↺ Reset</a>
+      <a href="../reports/" class="btn btn-outline">↺ Reset</a>
       <?php if (!empty($results)): ?>
         <button type="button" class="btn btn-outline" onclick="window.print()" style="margin-left:auto;">🖨 Print</button>
       <?php endif; ?>
@@ -476,7 +472,7 @@ $orderCount = (int)$oStmt->fetchColumn();
 </div><!-- .page -->
 
 <footer style="text-align:center; padding:24px 16px; font-size:.78rem; color:#999; border-top:1px solid var(--border); margin-top:40px;">
-  &copy; 2026 <strong>Chromagic Development</strong> &mdash; OpenPantry, by
+  &copy; 2026 <strong>Chromagic Development</strong> &mdash;
   <strong>Bruce Alexander</strong>.
   Released under the
   <a href="../../LICENSE" style="color:var(--brown); text-decoration:none;">MIT License</a>.

@@ -25,7 +25,7 @@ it uses SQLite, which stores all data in a single local file (picklist.db).
   index.php         Customer-facing order form
   orders.php        Employee pick queue dashboard
   admin.php         Administrator configuration panel (password protected)
-  report.php        Item usage reports with chart (requires admin login)
+  orders_listing.php  Item usage reports with chart (requires admin login)
   submit_order.php  Handles order form POST submission (no UI)
   api.php           JSON API for AJAX calls from orders.php and admin.php
   db.php            Database initialization and shared helpers
@@ -50,7 +50,10 @@ it uses SQLite, which stores all data in a single local file (picklist.db).
 
     /footprints/admin/      <- admin folder
       admin.php
-      report.php
+
+    /footprints/reports/    <- reports folder
+      orders_listing.php
+      volume/volume_report.php
 
 
 --------------------------------------------------------------------------------
@@ -120,9 +123,9 @@ it uses SQLite, which stores all data in a single local file (picklist.db).
     Example: Factor 0.5 → family of 3 gets ceil(3 × 0.5) = 2 units
   - System Configuration section: set allowed IP address and admin password
   - Admin login persists for 2 months via cookie; logout clears it
-  - Reports link navigates to report.php
+  - Reports link navigates to reports/orders_listing.php
 
-  REPORT.PHP — Usage Reports (Requires Admin Login)
+  ORDERS_LISTING.PHP — Usage Reports (Requires Admin Login)
   ---------------------------------------------------
   - Filter by date range, customer name, category, and item name
   - Customer names are anonymized as Client 1, Client 2, etc.
@@ -166,7 +169,7 @@ it uses SQLite, which stores all data in a single local file (picklist.db).
   - IP restriction in System Configuration blocks index.php access to devices
     not matching the configured IP. Leave blank to allow all IPs.
 
-  - report.php and admin.php are not accessible without the admin cookie.
+  - orders_listing.php and admin.php are not accessible without the admin cookie.
 
   - orders.php uses the same IP restriction as index.php.
 

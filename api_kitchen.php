@@ -19,7 +19,9 @@ if ($key === '') {
 }
 
 if ($action === 'recipe') {
-    $open = currentOpenOrder();
+    // activeScanOrder() so an assisting station reads the shared basket rather
+    // than reporting nothing open.
+    $open = activeScanOrder();
     if (!$open) jsonOut(['ok' => false, 'error' => 'No open order — scan items first.'], 409);
 
     $st = getDB()->prepare(

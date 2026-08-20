@@ -33,7 +33,8 @@ ksort($names, SORT_NATURAL | SORT_FLAG_CASE);
 
 $saved = false;
 $produceCleared = false;
-// Rows saved with an Order Unit but no Avg Wt to convert by (see the save loop).
+// Purchased rows saved with an Order Unit but no Avg Wt to convert by
+// (see the save loop).
 $needsWeight = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (($_POST['action'] ?? '') === 'remove_produce') {
@@ -68,6 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'ounit' => array_key_exists('ounit', $r) ? (string)$r['ounit'] : null,
                     'lbea'  => array_key_exists('lbea', $r)  ? (string)$r['lbea']  : null,
                     'alt'   => array_key_exists('alt', $r)   ? (string)$r['alt']   : null,
+                    'crt'   => array_key_exists('crt', $r)   ? (string)$r['crt']   : null,
                     'del'   => !empty($r['del']),
                 ];
             }
@@ -83,6 +85,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $orderUnits = $_POST['order_unit']  ?? [];
             $lbPerEachs = $_POST['lb_per_each'] ?? [];
             $altCases   = $_POST['alt_case']    ?? [];
+            $cratesPer  = $_POST['crates_per_case'] ?? [];
             // Deliverable: unchecked boxes don't submit at all, so default
             // every submitted row to 0 and flip the ones the browser DID send.
             $deliverablePost = $_POST['deliverable'] ?? [];
@@ -95,6 +98,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'ounit' => array_key_exists($i, $orderUnits) ? (string)$orderUnits[$i] : null,
                     'lbea'  => array_key_exists($i, $lbPerEachs) ? (string)$lbPerEachs[$i] : null,
                     'alt'   => array_key_exists($i, $altCases)   ? (string)$altCases[$i]   : null,
+                    'crt'   => array_key_exists($i, $cratesPer)  ? (string)$cratesPer[$i]  : null,
                     'del'   => isset($deliverablePost[$i]),
                 ];
             }
@@ -112,26 +116,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
              VALUES (?, 0, ?, ?, ?)
              ON CONFLICT(generic_name) DO UPDATE SET deliverable = excluded.deliverable"
         );
-        // The four ordering fields, also independent of count and written
+        // The five ordering fields, also independent of count and written
         // together because they only mean anything as a set: Count/Case is a
         // number of Order Units, Order Unit is only honoured when Avg Wt
-        // supplies the conversion, and Alt Case renames the case the other
-        // three add up to. 0 / '' = "not set", which the Order Report renders
-        // as "—" in its Case Request column, treats as "order in the stock
-        // unit", and reads as the plain word "case(s)" respectively.
+        // supplies the conversion, Alt Case renames the case the other three
+        // add up to, and Cu Ft/Case says how much floor that same case takes.
+        // 0 / '' = "not set", which the Order Report renders as "—" in its Case
+        // Request column, treats as "order in the stock unit", reads as the
+        // plain word "case(s)", and leaves out of the capacity total.
         $updOrder = $db->prepare(
-            "INSERT INTO inventory (generic_name, count, unit, updated_at, count_per_case, order_unit, lb_per_each, alt_case)
-             VALUES (?, 0, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO inventory (generic_name, count, unit, updated_at, count_per_case, order_unit, lb_per_each, alt_case, crates_per_case)
+             VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(generic_name) DO UPDATE SET
-               count_per_case = excluded.count_per_case,
-               order_unit     = excluded.order_unit,
-               lb_per_each    = excluded.lb_per_each,
-               alt_case       = excluded.alt_case"
+               count_per_case  = excluded.count_per_case,
+               order_unit      = excluded.order_unit,
+               lb_per_each     = excluded.lb_per_each,
+               alt_case        = excluded.alt_case,
+               crates_per_case = excluded.crates_per_case"
         );
-        // Current ordering fields, so a submission that omits one of the four
+        // Current ordering fields, so a submission that omits one of the five
         // (a truncated or hand-rolled POST) preserves it instead of zeroing it.
+        // (restocked_purchased comes along for the Avg Wt warning, which only
+        // concerns items the pantry actually buys — see the flag below.)
         $curOrder = [];
-        foreach ($db->query("SELECT generic_name, count_per_case, order_unit, lb_per_each, alt_case FROM inventory") as $c) {
+        foreach ($db->query("SELECT generic_name, count_per_case, order_unit, lb_per_each, alt_case, crates_per_case, restocked_purchased FROM inventory") as $c) {
             $curOrder[$c['generic_name']] = $c;
         }
         // The unit also lives in produce_lookup, so keep it in sync — otherwise
@@ -156,7 +164,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // size or order unit can be cleared; a field the POST left out
             // entirely keeps its stored value.
             if ($r['case'] !== null || $r['ounit'] !== null || $r['lbea'] !== null
-                || $r['alt'] !== null) {
+                || $r['alt'] !== null || $r['crt'] !== null) {
                 $cur = $curOrder[$name] ?? [];
                 $cpc = $r['case'] !== null
                      ? ((is_numeric($r['case']) && (float)$r['case'] > 0) ? (float)$r['case'] : 0.0)
@@ -176,15 +184,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      ? trim(preg_replace('/\s+/u', ' ', $r['alt']) ?? $r['alt'])
                      : (string)($cur['alt_case'] ?? '');
                 if (mb_strlen($alt) > 200) $alt = mb_substr($alt, 0, 200);
+                // Cu Ft/Case: same "0 = not set" convention as Count/Case, and
+                // the Order Report leans on it — an item with no factor is left
+                // out of the capacity total rather than counted as zero space.
+                $crt = $r['crt'] !== null
+                     ? ((is_numeric($r['crt']) && (float)$r['crt'] > 0) ? (float)$r['crt'] : 0.0)
+                     : (float)($cur['crates_per_case'] ?? 0);
                 // Picking the stock unit as the order unit is just "no
                 // override" — store it as such so the report never has to
                 // special-case the two being equal.
                 if ($ou === $u) $ou = '';
                 // Set to order in the other unit with no average weight to
                 // convert by: the Order Report falls back to the stock unit, so
-                // flag it rather than let the row look configured.
-                if ($ou !== '' && $lbe <= 0) $needsWeight[] = $name;
-                $updOrder->execute([$name, $u, now(), $cpc, $ou, $lbe, $alt]);
+                // flag it rather than let the row look configured. Items that
+                // have never been restocked as purchased (Bought column shows
+                // "—" or 0%) arrive by donation and are never ordered, so the
+                // missing weight costs them nothing — don't nag about those.
+                if ($ou !== '' && $lbe <= 0
+                    && (float)($cur['restocked_purchased'] ?? 0) > 0) {
+                    $needsWeight[] = $name;
+                }
+                $updOrder->execute([$name, $u, now(), $cpc, $ou, $lbe, $alt, $crt]);
             }
             // Persist count + unit only if the user actually entered a value.
             if ($r['count'] === '') continue;
@@ -198,7 +218,7 @@ $inv = [];
 foreach ($db->query(
     "SELECT generic_name, count, unit, updated_at, deliverable,
             restocked_purchased, restocked_donated, count_per_case,
-            order_unit, lb_per_each, alt_case
+            order_unit, lb_per_each, alt_case, crates_per_case
        FROM inventory") as $r) {
     $inv[$r['generic_name']] = $r;
 }
@@ -271,13 +291,14 @@ renderNav('inventory');
       <input type="hidden" name="rows_json" id="rowsJson" value="">
       <div class="inv-table-wrap">
       <table class="data" id="invTable">
-        <!-- Percentage widths + table-layout:fixed keep all ten columns inside
-             the card no matter how long a generic name runs, so the table never
-             needs to scroll sideways on a desktop screen. -->
+        <!-- Percentage widths + table-layout:fixed keep all eleven columns
+             inside the card no matter how long a generic name runs, so the
+             table never needs to scroll sideways on a desktop screen. -->
         <colgroup>
           <col class="c-name"><col class="c-del"><col class="c-count">
           <col class="c-unit"><col class="c-ounit"><col class="c-lbea">
-          <col class="c-cpc"><col class="c-alt"><col class="c-pct"><col class="c-upd">
+          <col class="c-cpc"><col class="c-crt"><col class="c-alt">
+          <col class="c-pct"><col class="c-upd">
         </colgroup>
         <thead><tr>
           <th>Generic<br>Name</th>
@@ -286,7 +307,8 @@ renderNav('inventory');
           <th>Unit</th>
           <th title="The unit the wholesale vendor quotes this item's case in, when it differs from the unit the pantry stocks it in — loose avocados weighed in lb but bought by the 48-count case. Needs an Avg Wt to convert by.">Order<br>Unit</th>
           <th class="num" title="Average weight of one piece, in pounds. This is what converts between the two units: the Order Report divides by it to place the order in pieces and multiplies by it to book the delivery back into pounds.">Avg Wt<br>(lb ea)</th>
-          <th class="num" title="How many Order Units one supplier case holds — used for the Case Request column on the Order Report">Count/<br>Case</th>
+          <th class="num" title="How many Order Units one supplier case holds — used for the Case Request column on the Order Report">CtWt/<br>Case</th>
+          <th class="num" title="How many cubic feet one supplier case takes up on the floor. The Order Report adds these up across the checked items and warns when the order won't fit the Max Storage (cu ft) set under Settings. Measure every item the same way. Blank = not set, and the item is left out of that total.">Cu Ft/<br>Case</th>
           <th title="The vendor's own wording for this item's pack. When filled in, the Order Report's Email Order and Print Order lines read &quot;4 89-100 ct case(s), least expensive variety - Apples&quot; in place of the default &quot;4 cases - Apples (40 lb)&quot;: it replaces the word case(s) and the pack-size note in parentheses. Only the first few characters fit the column; the whole entry is stored and used.">Alt<br>Case</th>
           <th class="num" title="Lifetime % of this item's restocked amount that was purchased rather than donated">Bought</th>
           <th>Last<br>Updated</th>
@@ -323,6 +345,12 @@ renderNav('inventory');
             // Alt Case: free text, '' = unset. The field is only ~10 characters
             // wide, so the full entry lives in the title tooltip too.
             $altCase = (string)($row['alt_case'] ?? '');
+            // Cu Ft/Case: 0 = unset → blank field, same as Count/Case. Two
+            // decimals is plenty — these are eyeball figures like 1.5 or 2.
+            $crt = (float)($row['crates_per_case'] ?? 0);
+            $crtDisplay = $crt > 0
+                ? rtrim(rtrim(number_format($crt, 2, '.', ''), '0'), '.')
+                : '';
         ?>
           <tr data-name="<?= htmlspecialchars(strtolower($name)) ?>" data-kind="<?= htmlspecialchars($kinds[$name] ?? 'packaged') ?>">
             <td class="inv-name">
@@ -371,6 +399,11 @@ renderNav('inventory');
                      name="case_count[<?= $i ?>]"
                      value="<?= htmlspecialchars($cpcDisplay) ?>">
             </td>
+            <td class="num">
+              <input type="number" step="any" min="0" placeholder="—"
+                     name="crates_per_case[<?= $i ?>]"
+                     value="<?= htmlspecialchars($crtDisplay) ?>">
+            </td>
             <td>
               <input type="text" class="inv-alt" maxlength="200" placeholder="—"
                      name="alt_case[<?= $i ?>]"
@@ -402,20 +435,21 @@ renderNav('inventory');
   /* min-width is the phone floor: below it the wrapper scrolls rather than
      squeezing the selects and the count field down to unusable slivers. Any
      card wider than this (every desktop and tablet width) fits with no scroll. */
-  #invTable { table-layout: fixed; min-width: 780px; }
+  #invTable { table-layout: fixed; min-width: 860px; }
   /* Percentages total 100 — the widths below are the whole budget. */
   #invTable .c-name  { width: 14%; }
-  #invTable .c-del   { width:  9%; }
-  #invTable .c-count { width: 17%; }
-  #invTable .c-unit  { width:  8%; }
-  #invTable .c-ounit { width:  9%; }
-  #invTable .c-lbea  { width:  8%; }
-  #invTable .c-cpc   { width:  8%; }
+  #invTable .c-del   { width:  8%; }
+  #invTable .c-count { width: 16%; }
+  #invTable .c-unit  { width:  7%; }
+  #invTable .c-ounit { width:  8%; }
+  #invTable .c-lbea  { width:  7%; }
+  #invTable .c-cpc   { width:  7%; }
+  #invTable .c-crt   { width:  7%; }
   #invTable .c-alt   { width: 10%; }
-  #invTable .c-pct   { width:  8%; }
+  #invTable .c-pct   { width:  7%; }
   #invTable .c-upd   { width:  9%; }
   /* Tighter than the shared table.data rhythm: at 18px root the default
-     8px/10px padding alone costs ~200px across ten columns. */
+     8px/10px padding alone costs ~220px across eleven columns. */
   #invTable th, #invTable td { padding: 6px 5px; font-size: .8rem; }
   #invTable th { font-size: .62rem; line-height: 1.25; hyphens: auto; }
   #invTable .inv-name { overflow-wrap: anywhere; }
@@ -516,6 +550,7 @@ if (invForm) invForm.addEventListener('submit', function() {
     var ounitSel= tr.querySelector('select[name^="order_unit["]');
     var lbeaIn  = tr.querySelector('input[name^="lb_per_each["]');
     var altIn   = tr.querySelector('input[name^="alt_case["]');
+    var crtIn   = tr.querySelector('input[name^="crates_per_case["]');
     var delCb   = tr.querySelector('input[type=checkbox][name^="deliverable["]');
     data.push({
       name:   nameInput.value,
@@ -525,6 +560,7 @@ if (invForm) invForm.addEventListener('submit', function() {
       ounit:  ounitSel ? ounitSel.value : '',
       lbea:   lbeaIn ? lbeaIn.value : '',
       alt:    altIn ? altIn.value : '',
+      crt:    crtIn ? crtIn.value : '',
       del:    !!(delCb && delCb.checked)
     });
   });

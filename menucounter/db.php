@@ -40,12 +40,81 @@ function foodscanSetting(string $key, ?string $default = null): ?string {
     }
 }
 
+// ── Shared admin/supervisor auth cookie ──────────────────────────────────────
+// The PantryPrep pages here trust the same `fp_admin_auth` cookie FoodScan
+// issues (auth.php). Two passwords can mint it: `admin_password` and the
+// optional `supervisor_password` (Settings -> Supervisor Password), which
+// opens the same pages. The token is a SHA-256 of the STORED value — the
+// password_hash, not the typed password — so rotating either one invalidates
+// the sessions it issued.
+function fpMcAuthToken(string $stored): string {
+    return hash('sha256', 'fp_admin_' . $stored);
+}
+
+function foodscanSupervisorStored(): string {
+    return (string)foodscanSetting('supervisor_password', '');
+}
+
+function foodscanVerifySupervisorPassword(string $submitted): bool {
+    $stored = foodscanSupervisorStored();
+    return $stored !== '' && fpVerifyAdminPassword($submitted, $stored);
+}
+
+// The stored value the current cookie was issued for, or null when the cookie
+// is missing or stale. Callers re-issue the cookie from this so a sliding
+// renewal keeps a supervisor session a supervisor session. Null rather than ''
+// because an empty stored password is itself a (legacy) valid seed.
+function foodscanAuthSeed(): ?string {
+    $cookie = $_COOKIE['fp_admin_auth'] ?? '';
+    if ($cookie === '') return null;
+    $admin = (string)foodscanSetting('admin_password', 'admin');
+    if (hash_equals(fpMcAuthToken($admin), $cookie)) return $admin;
+    $sup = foodscanSupervisorStored();
+    if ($sup !== '' && hash_equals(fpMcAuthToken($sup), $cookie)) return $sup;
+    return null;
+}
+
+function foodscanAuthCookieValid(): bool {
+    return foodscanAuthSeed() !== null;
+}
+
+// One connection per request, opened on first use. Every page here calls
+// getDB() once, but the order-form kiosks poll api.php every few seconds, so
+// each avoided reconnect is one less connection contending for the file.
 function getDB() {
+    static $db = null;
+    if ($db !== null) return $db;
+    try {
+        return $db = openPicklistDb();
+    } catch (\PDOException $e) {
+        // A locked or unreadable picklist.db used to surface as a bare 500 with
+        // nothing written anywhere. Log the real SQLite message, then rethrow
+        // something a caller can show a human — api.php catches Exception and
+        // returns it as JSON.
+        error_log('OpenPantry: picklist.db unavailable (' . fsDbPath('picklist.db') . ') — ' . $e->getMessage());
+        throw new \RuntimeException(
+            'The pantry database is busy or unavailable. Please try again in a moment.',
+            0,
+            $e
+        );
+    }
+}
+
+function openPicklistDb(): PDO {
     $dbPath = fsDbPath('picklist.db');
     $db = new PDO('sqlite:' . $dbPath);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-	$db->exec("PRAGMA journal_mode = WAL");
+    // Set the busy timeout before any pragma that can itself need a lock: until
+    // it is set, a contended statement fails with SQLITE_BUSY instantly and
+    // gets no retry window at all.
     $db->exec("PRAGMA busy_timeout = 5000"); // wait up to 5 seconds before failing on lock
+    // Only *assign* journal_mode when it is actually wrong. Reading it takes no
+    // lock; converting the file to WAL needs an exclusive one, which is
+    // unobtainable while a kiosk is polling. WAL is persistent in the database
+    // header, so on a healthy install this branch never runs.
+    if (strtolower((string)$db->query("PRAGMA journal_mode")->fetchColumn()) !== 'wal') {
+        $db->exec("PRAGMA journal_mode = WAL");
+    }
     $db->exec("PRAGMA foreign_keys = ON");
 
     // Migrate: add unavailable column if it doesn't exist yet

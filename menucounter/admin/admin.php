@@ -39,9 +39,12 @@ function clearAuthCookie() {
     unset($_COOKIE[AUTH_COOKIE]);
 }
 
-function isAuthenticated($password) {
-    $cookie = $_COOKIE[AUTH_COOKIE] ?? '';
-    return $cookie !== '' && hash_equals(makeAuthToken($password), $cookie);
+// Either the administrator or the supervisor password (Settings -> Supervisor
+// Password) may hold this session — both open the PantryPrep admin panel.
+// foodscanAuthSeed() (../db.php) reports WHICH stored value the cookie was
+// issued for, so the renewal below re-issues the same one.
+function isAuthenticated() {
+    return foodscanAuthCookieValid();
 }
 
 // Handle login form submission. admin_password is a one-way hash in
@@ -55,12 +58,18 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
     if ($gate['mode'] === 'wait') {
         $loginError = 'Too many failed attempts. ' . fpThrottleWaitText($gate['wait']);
     } else {
-        $passOk = fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword);
+        $submitted  = (string)($_POST['password'] ?? '');
+        $passOk     = fpVerifyAdminPassword($submitted, $adminPassword);
+        $cookieSeed = $adminPassword;
+        if (!$passOk && foodscanVerifySupervisorPassword($submitted)) {
+            $passOk     = true;
+            $cookieSeed = foodscanSupervisorStored();
+        }
         $otpOk  = ($gate['mode'] !== 'otp')
                || fpLoginOtpCheck($clientIp, trim((string)($_POST['otp'] ?? '')));
         if ($passOk && $otpOk) {
             fpLoginRecordSuccess($clientIp);
-            setAuthCookie($adminPassword, $twoMonths);
+            setAuthCookie($cookieSeed, $twoMonths);
         } else {
             fpLoginRecordFailure($clientIp);
             $loginError = ($gate['mode'] === 'otp')
@@ -80,8 +89,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'verify_password') {
     header('Content-Type: application/json');
     $gate = fpLoginGate($clientIp, false);
     $ok   = false;
-    if ($gate['mode'] !== 'wait' && isAuthenticated($adminPassword)) {
-        $ok = fpVerifyAdminPassword($_POST['password'] ?? '', $adminPassword);
+    if ($gate['mode'] !== 'wait' && isAuthenticated()) {
+        $submitted = (string)($_POST['password'] ?? '');
+        $ok = fpVerifyAdminPassword($submitted, $adminPassword)
+           || foodscanVerifySupervisorPassword($submitted);
         if ($ok) fpLoginRecordSuccess($clientIp);
         else     fpLoginRecordFailure($clientIp);
     }
@@ -96,13 +107,15 @@ if (isset($_GET['logout'])) {
     exit;
 }
 
-// Refresh cookie expiry on each authenticated visit
-if (isAuthenticated($adminPassword)) {
-    setAuthCookie($adminPassword, $twoMonths);
+// Refresh cookie expiry on each authenticated visit, re-issuing the token from
+// the same stored password it was minted with (admin or supervisor).
+$authSeed = foodscanAuthSeed();
+if ($authSeed !== null) {
+    setAuthCookie($authSeed, $twoMonths);
 }
 
 // Show login wall if not authenticated
-if (!isAuthenticated($adminPassword)) {
+if (!isAuthenticated()) {
     // Rendering the wall is the one moment a soft-locked IP may trigger the
     // (paced) security-code email — see fpLoginGate's $allowSend.
     $gate   = fpLoginGate($clientIp, true);
@@ -136,7 +149,7 @@ if (!isAuthenticated($adminPassword)) {
 <body>
 <div class="login-card">
   <h1>⚙ Admin Login</h1>
-  <p>Enter the administrator password to continue.</p>
+  <p>Enter the <?= foodscanSupervisorStored() !== '' ? 'administrator or supervisor' : 'administrator' ?> password to continue.</p>
   <?php if (!empty($loginError)): ?>
     <div class="error">⚠ <?= htmlspecialchars($loginError) ?></div>
   <?php endif; ?>
@@ -269,7 +282,7 @@ if (!isAuthenticated($adminPassword)) {
   <div class="header-actions">
     <a href="../orders">← Orders</a>
     <a href="../" target="_blank" rel="noopener noreferrer">📋 Order Form</a>
-    <a href="../report/">📊 Report</a>
+    <a href="../reports/">📊 Report</a>
     <a href="../admin?logout=1">🔒 Log Out</a>
   </div>
 </header>
@@ -663,7 +676,7 @@ loadItems();
 </script>
 
 <footer style="text-align:center; padding:24px 16px; font-size:.78rem; color:#999; border-top:1px solid var(--border); margin-top:40px;">
-  &copy; 2026 <strong>Chromagic Development</strong> &mdash; OpenPantry, by
+  &copy; 2026 <strong>Chromagic Development</strong> &mdash;
   <strong>Bruce Alexander</strong>.
   Released under the
   <a href="../../LICENSE" style="color:var(--brown); text-decoration:none;">MIT License</a>.

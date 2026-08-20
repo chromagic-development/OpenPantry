@@ -43,13 +43,17 @@
 
 const FS_ENC_MARKER = 'sb1:';
 
-// Every settings row is encrypted at rest EXCEPT these two:
+// Every settings row is encrypted at rest EXCEPT these three:
 //   admin_password — protected by a stronger primitive (one-way password_hash,
 //     see below); wrapping the hash in ciphertext would break the raw reads in
 //     migrateHashAdminPassword() and gain nothing.
+//   supervisor_password — same one-way hash as admin_password, and for the same
+//     reason. It must also stay readable as stored: the auth cookie token is
+//     derived from the stored value, so encrypting it would make the token
+//     differ between the writer and the reader.
 //   enc_fields_v1 — plain migration bookkeeping ('1') that must stay readable
 //     even before sodium / the key file are available.
-const FS_UNENCRYPTED_SETTINGS = ['admin_password', 'enc_fields_v1'];
+const FS_UNENCRYPTED_SETTINGS = ['admin_password', 'supervisor_password', 'enc_fields_v1'];
 
 function fsSettingIsEncrypted(string $key): bool {
     return !in_array($key, FS_UNENCRYPTED_SETTINGS, true);

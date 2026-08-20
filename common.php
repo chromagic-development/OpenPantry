@@ -175,14 +175,15 @@ function renderNav(string $active = ''): void {
     // propagates from a child up to its parent trigger (so visiting any
     // Reports page lights up the Reports trigger).
     //
-    // Scan (Laser) and Menu Counter (PantryPrep admin) open in a new tab —
+    // Scan and Menu Counter (PantryPrep admin) open in a new tab —
     // the rest open in the current tab.
     $newTabKeys = ['scan', 'menu_counter'];
     $nav = [
         ['type' => 'link', 'key' => 'index', 'label' => 'Dashboard', 'href' => $dash],
         ['type' => 'group', 'label' => 'Checkout', 'children' => [
-            ['key' => 'scan',         'label' => 'Scan (Laser)',  'href' => $p . 'scan/'],
-            ['key' => 'scan_camera',  'label' => 'Scan (Camera)', 'href' => $p . 'scan_camera/'],
+            // One scan page for both input methods: the laser scanner types into
+            // the barcode field, and Start Camera turns a phone into a scanner.
+            ['key' => 'scan',         'label' => 'Scan',          'href' => $p . 'scan/'],
             ['key' => 'menu_counter', 'label' => 'Menu Counter',  'href' => $p . 'menucounter/admin/'],
             ['key' => 'delivery',     'label' => 'Deliveries',    'href' => $p . 'delivery/client/'],
             ['key' => 'order_ahead',  'label' => 'OrderAhead',    'href' => $p . 'orderahead/'],
@@ -197,6 +198,7 @@ function renderNav(string $active = ''): void {
             ['key' => 'usage',   'label' => 'Item Usage',     'href' => $p . 'reports/usage_report/'],
             ['key' => 'volume',  'label' => 'Daily Volume',   'href' => $p . 'reports/volume_report/'],
             ['key' => 'basket',  'label' => 'Basket Size',    'href' => $p . 'reports/basket_report/'],
+            ['key' => 'impact',  'label' => 'Impact',         'href' => $p . 'reports/impact_report/'],
         ]],
         ['type' => 'link', 'key' => 'settings', 'label' => 'Settings', 'href' => $p . 'settings/'],
     ];
@@ -247,7 +249,7 @@ function renderFoot(): void {
     ?>
 <footer class="site-footer" style="text-align:center; padding:24px 16px; font-size:.78rem;
         color:#999; border-top:1px solid var(--border); margin-top:40px;">
-  &copy; 2026 <strong>Chromagic Development</strong> &mdash; OpenPantry, by
+  &copy; 2026 <strong>Chromagic Development</strong> &mdash;
   <strong>Bruce Alexander</strong>.
   Released under the
   <a href="<?= $p ?>LICENSE" style="color:var(--brown); text-decoration:none;">MIT License</a>.
@@ -270,8 +272,8 @@ function currentStationId(): string {
     }
 
     $sid = bin2hex(random_bytes(16));
-    // 1-year cookie, path '/' so the scan pages (/scan/, /scan_camera/) and the
-    // API endpoints at the app root share the same token. Legacy setcookie
+    // 1-year cookie, path '/' so the scan page (/scan/) and the API
+    // endpoints at the app root share the same token. Legacy setcookie
     // signature for PHP 7.2 compatibility (matches the sodium note in db.php).
     @setcookie('fs_station', $sid, time() + 365 * 24 * 3600, '/');
     $_COOKIE['fs_station'] = $sid; // visible to the rest of this same request
@@ -298,6 +300,150 @@ function allOpenOrders(): array {
     return getDB()
         ->query("SELECT * FROM orders WHERE status='open' ORDER BY id DESC")
         ->fetchAll();
+}
+
+// ── Team scanning ───────────────────────────────────────────────────────────
+// A second station can "assist" an order started elsewhere so two operators
+// check the same household out together. The assist is a row in order_assists;
+// ownership stays with orders.station, so only the starting station may End or
+// Cancel. A helper leaves by deleting its row.
+
+// The open order this station has joined as a helper, or null.
+function assistedOrder(?string $station = null): ?array {
+    if ($station === null) $station = currentStationId();
+    $stmt = getDB()->prepare(
+        "SELECT o.* FROM orders o
+           JOIN order_assists a ON a.order_id = o.id
+          WHERE o.status='open' AND a.station=?
+          ORDER BY o.id DESC LIMIT 1"
+    );
+    $stmt->execute([$station]);
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
+// The order this station should be scanning into: its own open order if it has
+// one, otherwise one it is assisting. Adds `is_assist` so callers can tell the
+// two apart. Owning always wins, so a station is never in both roles at once —
+// which is also why joinOrderAssist() refuses while an own order is open.
+//
+// This is the resolver for every scan-flow write (api_scan record/delete,
+// api_kitchen). End / Cancel deliberately keep using currentOpenOrder().
+function activeScanOrder(): ?array {
+    $own = currentOpenOrder();
+    if ($own) { $own['is_assist'] = false; return $own; }
+    $assisted = assistedOrder();
+    if ($assisted) { $assisted['is_assist'] = true; return $assisted; }
+    return null;
+}
+
+// Open orders this station could offer to help with: someone else's, and not a
+// legacy station-less row (those can't be attributed to a live scanner). Each
+// carries the counts the picker shows.
+function assistableOrders(): array {
+    $stmt = getDB()->prepare(
+        "SELECT o.*,
+                (SELECT COUNT(*) FROM scans s WHERE s.order_id = o.id) AS scan_count,
+                (SELECT COUNT(*) FROM order_assists a WHERE a.order_id = o.id) AS assist_count
+           FROM orders o
+          WHERE o.status='open' AND o.station <> '' AND o.station <> ?
+          ORDER BY o.id DESC"
+    );
+    $stmt->execute([currentStationId()]);
+    return $stmt->fetchAll();
+}
+
+// Short per-order display labels for the stations working an order: the owner
+// is '1', helpers are '2', '3'… in join order. Derived rather than stored, so
+// nothing new persists and a label stays stable for the life of the order.
+// Returns station token => label.
+function orderStations(int $orderId): array {
+    $db = getDB();
+    $own = $db->prepare("SELECT station FROM orders WHERE id=?");
+    $own->execute([$orderId]);
+    $ownerStation = (string)($own->fetchColumn() ?: '');
+
+    $labels = [];
+    if ($ownerStation !== '') $labels[$ownerStation] = '1';
+
+    $helpers = $db->prepare(
+        "SELECT station FROM order_assists WHERE order_id=? ORDER BY joined_at, station"
+    );
+    $helpers->execute([$orderId]);
+    foreach ($helpers->fetchAll() as $h) {
+        $s = (string)$h['station'];
+        if ($s !== '' && !isset($labels[$s])) $labels[$s] = (string)(count($labels) + 1);
+    }
+    return $labels;
+}
+
+// How many stations are currently helping an order (excludes the owner).
+function orderAssistCount(int $orderId): int {
+    $stmt = getDB()->prepare("SELECT COUNT(*) FROM order_assists WHERE order_id=?");
+    $stmt->execute([$orderId]);
+    return (int)$stmt->fetchColumn();
+}
+
+// Join an open order as a helper. Returns an error string on refusal, null on
+// success. Idempotent — re-joining an order this station already helps is fine.
+function joinOrderAssist(int $orderId): ?string {
+    $db = getDB();
+    $stmt = $db->prepare("SELECT * FROM orders WHERE id=?");
+    $stmt->execute([$orderId]);
+    $order = $stmt->fetch();
+
+    if (!$order)                        return 'That order no longer exists.';
+    if ($order['status'] !== 'open')    return 'Order #' . $orderId . ' is already closed.';
+    if ($order['station'] === currentStationId()) {
+        return 'That is this station\'s own order.';
+    }
+    if (currentOpenOrder()) {
+        return 'End this station\'s own order before assisting another.';
+    }
+
+    $db->prepare(
+        "INSERT INTO order_assists (order_id, station, joined_at) VALUES (?, ?, ?)
+         ON CONFLICT(order_id, station) DO NOTHING"
+    )->execute([$orderId, currentStationId(), now()]);
+    return null;
+}
+
+// Detach this station from the order it is assisting (or from a specific one).
+function leaveOrderAssist(?int $orderId = null): void {
+    if ($orderId === null) {
+        getDB()->prepare("DELETE FROM order_assists WHERE station=?")
+               ->execute([currentStationId()]);
+        return;
+    }
+    getDB()->prepare("DELETE FROM order_assists WHERE order_id=? AND station=?")
+           ->execute([$orderId, currentStationId()]);
+}
+
+// Detach every helper from an order — called when it is ended or cancelled, so
+// the helping stations fall back to idle on their next sync.
+function clearOrderAssists(int $orderId): void {
+    getDB()->prepare("DELETE FROM order_assists WHERE order_id=?")->execute([$orderId]);
+}
+
+// An order's scans in ascending id order, shaped for the scan page's table:
+// the raw columns plus a server-formatted time (scanned_at is 'Y-m-d H:i:s',
+// which JS Date parsing handles inconsistently across engines) and the short
+// station label from orderStations(). Used both to hydrate the page on load and
+// to redraw it from the sync poll, so the two paths can't drift apart.
+function orderScanRows(int $orderId): array {
+    $labels = orderStations($orderId);
+    $st = getDB()->prepare(
+        "SELECT id, barcode, generic_name, kind, quantity, weight_lbs, scanned_at, station
+           FROM scans WHERE order_id = ? ORDER BY id ASC"
+    );
+    $st->execute([$orderId]);
+    $rows = [];
+    foreach ($st->fetchAll() as $r) {
+        $r['time_label']    = date('g:i:s A', strtotime($r['scanned_at']));
+        $r['station_label'] = $labels[(string)$r['station']] ?? '';
+        $rows[] = $r;
+    }
+    return $rows;
 }
 
 function jsonOut($data, int $code = 200): void {

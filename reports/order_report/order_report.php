@@ -37,6 +37,20 @@
 // over to inventory.order_unit for the case count and the order sheet, then
 // back again for Restock Now, using inventory.lb_per_each. Those conversions
 // all happen in report_lib.php; the table below stays in pantry units.
+//
+// The Order Request column is an editable numeric field on every row, holding
+// the recommendation rounded exactly as the column used to print it (blank when
+// there is nothing to order, which includes every item the pantry has never
+// scanned — those have no forecast at all). A recommendation is a starting
+// point: the operator can raise it, cut it, or type one in from nothing, and
+// whatever the field holds is what the email, the print sheet and Restock Now
+// carry. That makes the field the single source of truth for the order, so the
+// JS at the foot of this file — not the server — runs report_lib.php's
+// conversion chain (stock unit → order unit → whole cases → cu ft, and back to
+// the stock unit for the restock) over the current value, and repaints the ≈
+// line and Case Request as it changes. The consequence worth knowing: the
+// figure on screen is the figure ordered, with no full-precision value working
+// invisibly behind it.
 
 $GLOBALS['FS_PREFIX'] = '../../';
 require_once __DIR__ . '/../../common.php';
@@ -78,7 +92,8 @@ $z         = (float)setting('safety_z', '1.65');
 //     doesn't inflate Avg Daily / par levels for regular pantry demand.
 //   * Produce Only (default off): recommendations list only produce-kind
 //     items, and the Generate Email button (supplier produce order)
-//     becomes available.
+//     becomes available. Rows start with their Restock box checked, except
+//     where the Order Request is 0 — there is nothing to order on those.
 //   * Purchased Only (default off): recommendations list only items that
 //     have a non-zero Purchased value on the Inventory page (i.e. some of
 //     their restocked amount was purchased rather than donated).
@@ -111,7 +126,36 @@ $rows = op_report_rows($db, [
     'ignore_events'   => $ignoreEvents,
     'produce_only'    => $produceOnly,
     'purchased_only'  => $purchasedOnly,
+    // Always on for the page. The report is built from scan history, so an item
+    // the pantry has never scanned would otherwise have no row at all and no way
+    // to be ordered from here. It carries no forecast either way — it simply
+    // appears with an empty Order Request to type into. The cron mailer doesn't
+    // pass this and keeps the pure forecast: an item with no history can never
+    // trigger a reorder alert, so listing it there would be noise.
+    'include_unscanned' => true,
 ]);
+
+// Storage capacity. The cubic feet an order needs are summed client-side from
+// the ticked rows (they change with every click), but what's already accounted
+// for doesn't depend on the checkboxes, so it's totalled here — over every
+// listed row with a Cu Ft/Case, not just the ticked ones, because stock of an item
+// you're *not* reordering still occupies the same floor.
+//
+// "Already accounted for" is deliberately not "already on the shelf": Restock
+// Now is clicked when an order is placed rather than when it arrives, so an
+// Inventory count is an inventory *position* — shelf plus everything in
+// transit. That is the right basis here, since all of it has to fit in the same
+// room by the time this order lands. It also means the total never subtracts
+// the demand served between now and delivery, so it reads slightly high, which
+// is the safe direction for a capacity warning.
+$maxCrates   = max(0, (int)setting('max_storage_crates', '0'));
+$stockCrates = 0.0;
+$anyCrates   = false;
+foreach ($rows as $r) {
+    if (empty($r['has_crates'])) continue;
+    $anyCrates    = true;
+    $stockCrates += (float)$r['stock_crates'];
+}
 
 // Reorder reminders: one HTML line per triggered alert, same wording the
 // cron mailer uses (built from the structured entries report_lib returns).
@@ -148,7 +192,37 @@ renderNav('report');
     font-size: .85rem; text-transform: none; white-space: nowrap;
   }
   .rep-toggle input { width: auto; margin: 0; }
+  /* Editable Order Request. The base rules make every number input full-width
+     at 1rem, which would blow the column open, so the in-table field is sized
+     to the digits it holds and the spinner arrows (~15px of nothing) are
+     dropped, matching the Inventory table's number fields. */
+  table#repTable input.order-qty {
+    width: 4.4em; padding: 4px 5px; font-size: .8rem;
+    text-align: right; border-width: 1px; font-weight: 800;
+    /* Number inputs don't inherit the cell colour, so the red the column used
+       to print a request in is set here — a quantity to order still reads as
+       one whether the forecast asked for it or the operator did. */
+    color: var(--red);
+  }
+  /* Empty box = nothing to order, and greys back to how a 0 used to look. */
+  table#repTable input.order-qty:placeholder-shown { color: #999; font-weight: 700; }
+  /* Overridden rows: the figure is still the request, but it is no longer the
+     forecast's, and that's worth seeing before the order goes out. */
+  table#repTable input.order-qty.edited {
+    border-color: var(--blue); background: #f2f8ff;
+  }
+  table#repTable input.order-qty::-webkit-outer-spin-button,
+  table#repTable input.order-qty::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0;
+  }
+  table#repTable input.order-qty { -moz-appearance: textfield; }
+  /* Live "≈ 6 count" line under the field — same look as the computed rows'
+     order-unit note it sits in place of. */
+  table#repTable .order-conv { font-weight: 400; font-size: .75rem; color: #777; }
   @media print {
+    /* The order sheet comes from Print Order; a printed copy of the report
+       itself should show what was typed, not an empty box. */
+    table#repTable input.order-qty { border: none; padding: 0; background: none; }
     .site-header, nav.subnav, .btn, form, .no-print { display:none; }
     .rep-table-wrap { overflow-x: visible; }
   }
@@ -205,7 +279,7 @@ renderNav('report');
             Purchased Only
           </label>
           <label class="rep-toggle"
-                 title="List only produce items; their Restock boxes start checked">
+                 title="List only produce items; Restock boxes start checked on rows with an Order Request">
             <input type="checkbox" name="produce_only" value="1" <?= $produceOnly ? 'checked' : '' ?>>
             Produce Only
           </label>
@@ -250,8 +324,12 @@ renderNav('report');
       to each item's scan history; the S and G columns are its seasonal and
       annual-growth factors. Items with too little history (&lt; ~2 months) use
       a trailing <?= $velWindow ?>-day average instead (S = G = 1, shown with a
-      <span title="trailing-average fallback">°</span> after the name). Adjust
-      velocity window and Z under <a href="../../settings/">Settings</a>.
+      <span title="trailing-average fallback">°</span> after the name). Items
+      the pantry has never scanned have no demand history to forecast from at
+      all; they're listed too, marked
+      <span title="never scanned">&empty;</span> with empty model columns, so
+      they can be ordered by hand. Adjust velocity window and Z under
+      <a href="../../settings/">Settings</a>.
     </p>
     <p id="orderMsg" style="font-size:.85rem; font-weight:700; margin-top:8px;"></p>
   </div>
@@ -360,52 +438,108 @@ renderNav('report');
              oninput="applyRepFilter()"
              style="max-width:340px; flex:1 1 200px;">
       <span id="repCount" style="font-size:.8rem; color:#777;"><?= count($rows) ?> items</span>
+      <?php if ($anyCrates): ?>
+        <!-- Live storage total, next to the checkboxes it reacts to rather than
+             up beside the order buttons, so it's on screen while ticking. -->
+        <span id="crateTotal" style="font-size:.8rem; margin-left:auto;"
+              title="Storage this order needs, in cubic feet, from the figure set per item on the Inventory page (Cu Ft/Case).&#10;&#10;&quot;On hand/on order&quot; is the current Inventory count, which already includes any delivery booked in with Restock Now at the time it was ordered — so it covers what is on the shelf AND what is still in transit. That is everything that will be in the room when this order lands.&#10;&#10;Demand between now and delivery is not subtracted, so the figure runs a little high. Items with no Cu Ft/Case are left out of it entirely."></span>
+      <?php endif; ?>
     </div>
+    <p class="no-print" style="color:#777; font-size:.8rem; margin:-4px 0 12px;">
+      <strong>Order Request</strong> is editable on every row. The forecast fills
+      it in where it has one; change it, or type one into a blank box, and the
+      order unit, case count and Restock Now all follow — quantities are always
+      in the unit the pantry stocks the item in. Edited boxes are outlined in
+      blue, and their tooltip shows what the forecast had asked for. Clear a box
+      to leave that item out of the order.
+    </p>
     <div class="rep-table-wrap">
     <table class="data" id="repTable">
       <thead><tr>
-        <th title="Include this item in the order email / Restock Now">Restock</th>
+        <th title="Include this item in the order email / Restock Now">
+          <?php /* Master toggle, in the header so it sits at the top of the
+                   column it governs. It acts on the rows the filter is showing
+                   (every row when nothing is typed in the search box). */ ?>
+          <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer;"
+                 title="Check or uncheck the Restock box on every listed row">
+            <input type="checkbox" id="restockAll" onclick="toggleAllRestock(this)">
+            Restock
+          </label>
+        </th>
         <th>Generic Name</th>
         <th>Type</th>
         <th class="num" title="Expected daily demand over the lead time. Model-fitted items derive it from their full scan history; fallback items (marked &deg; after the name) use a trailing <?= $velWindow ?>-day average.">Avg Daily</th>
-        <th class="num" title="Per-day demand standard deviation; drives Safety Stock">σ</th>
+        <th class="num" style="text-transform:none" title="Per-day demand standard deviation; drives Safety Stock">σ</th>
         <th class="num" title="Z × √(predictive variance) — buffer for demand uncertainty over the lead time">Safety<br>Stock</th>
         <th class="num" title="Seasonality factor: this window's forecast vs. its deseasonalized baseline (1.0 = average season)">S</th>
         <th class="num" title="Growth factor: the model's annual demand multiplier, exp(trend) (1.0 = flat)">G</th>
         <th class="num">Par<br>Level</th>
         <th class="num">In Stock</th>
-        <th class="num">Order<br>Request</th>
+        <th class="num" title="How much to order, in the unit the pantry stocks the item in — editable on every row. The forecast fills it in; change it and the order unit, cases and Restock Now all follow. Clear it to leave the item out.">Order<br>Request</th>
         <th>Unit</th>
         <th class="num" title="Whole cases to cover the Order Request, from the Count/Case on the Inventory page — counted in the item's Order Unit, which may differ from the unit the pantry stocks it in">Case<br>Request</th>
       </tr></thead>
       <tbody>
       <?php foreach ($rows as $r): ?>
+        <?php
+          // The Order Request field is the single source of truth for what gets
+          // ordered, so it is pre-filled with the request rounded exactly as the
+          // column used to print it — whole units for 'each', one decimal for
+          // 'lb'. Everything downstream (order unit, cases, cu ft, restock) is
+          // derived in the browser from this number, which means the figure the
+          // operator reads is the figure the order carries; there is no
+          // full-precision value working invisibly behind it.
+          $reqRounded = $r['unit'] === 'each'
+                      ? ceil((float)$r['order'])
+                      : round((float)$r['order'], 1);
+          // Blank rather than 0 when there is nothing to order: an empty box
+          // invites a quantity, where a 0 reads as an answer.
+          $reqValue = $reqRounded > 0
+                    ? rtrim(rtrim(number_format($reqRounded, 1, '.', ''), '0'), '.')
+                    : '';
+          // Never scanned, so nothing in the demand columns was computed from
+          // anything. They print blank rather than as 0.00 / 1.00, which would
+          // read as a model that found no demand instead of no model at all.
+          $noHist = ($r['method'] === 'unscanned');
+        ?>
         <tr data-name="<?= htmlspecialchars(strtolower($r['name'])) ?>">
           <td style="text-align:center;">
+            <?php /* Only conversion inputs travel with the row now: the cases,
+                     order quantity, restock quantity and cubic-foot footprint all
+                     depend on the editable field, so they are computed in the
+                     browser rather than shipped as stale attributes. */ ?>
             <input type="checkbox" class="restock-cb"
                    data-name="<?= htmlspecialchars($r['name']) ?>"
-                   data-cases="<?= (int)$r['cases'] ?>"
                    data-cpc="<?= htmlspecialchars((string)(float)$r['cpc']) ?>"
                    data-unit="<?= htmlspecialchars($r['unit']) ?>"
-                   data-order="<?= htmlspecialchars((string)(float)$r['order']) ?>"
                    data-order-unit="<?= htmlspecialchars($r['order_unit']) ?>"
-                   data-order-qty="<?= htmlspecialchars((string)(float)$r['order_qty']) ?>"
-                   data-restock-qty="<?= htmlspecialchars((string)(float)$r['restock_qty']) ?>"
                    data-alt-case="<?= htmlspecialchars((string)($r['alt_case'] ?? '')) ?>"
-                   <?= $produceOnly ? 'checked' : '' ?>>
+                   data-has-crates="<?= !empty($r['has_crates']) ? '1' : '0' ?>"
+                   data-lb-per-each="<?= htmlspecialchars((string)(float)$r['lb_per_each']) ?>"
+                   data-crates-per-case="<?= htmlspecialchars((string)(float)$r['crates_per_case']) ?>"
+                   <?php /* Produce Only pre-checks the rows so a produce order
+                            can be sent without ticking each line, but only
+                            where there is something to order: a row whose
+                            Order Request is 0 (blank) contributes nothing to
+                            the email or Restock Now, so a tick there is just
+                            one more box to clear. */ ?>
+                   <?= ($produceOnly && $reqValue !== '') ? 'checked' : '' ?>>
           </td>
           <td><strong><?= htmlspecialchars($r['name']) ?></strong><?php
               // ° marks rows using the trailing-average fallback (too little
-              // history for the demand model). GLM-fitted rows get no marker.
-              if ($r['method'] !== 'glm') echo '<span title="Trailing-average fallback — not enough history to fit the demand model" style="color:#999; cursor:help;">&nbsp;°</span>';
+              // history for the demand model); ∅ marks rows with no scan
+              // history at all, listed only because Include Unscanned is on.
+              // GLM-fitted rows get no marker.
+              if ($noHist)                    echo '<span title="Never scanned — no demand history to forecast from, so there is no recommendation. Type a quantity to order it." style="color:#999; cursor:help;">&nbsp;&empty;</span>';
+              elseif ($r['method'] !== 'glm') echo '<span title="Trailing-average fallback — not enough history to fit the demand model" style="color:#999; cursor:help;">&nbsp;°</span>';
           ?></td>
           <td><?= htmlspecialchars($r['kind']) ?></td>
-          <td class="num"><?= number_format($r['adv'], 2) ?></td>
-          <td class="num"><?= number_format($r['sigma'], 2) ?></td>
-          <td class="num"><?= number_format($r['safety'], 1) ?></td>
-          <td class="num"><?= number_format($r['S'], 2) ?></td>
-          <td class="num"><?= number_format($r['G'], 2) ?></td>
-          <td class="num"><?= number_format($r['par'], 1) ?></td>
+          <td class="num"><?= $noHist ? '—' : number_format($r['adv'], 2) ?></td>
+          <td class="num"><?= $noHist ? '—' : number_format($r['sigma'], 2) ?></td>
+          <td class="num"><?= $noHist ? '—' : number_format($r['safety'], 1) ?></td>
+          <td class="num"><?= $noHist ? '—' : number_format($r['S'], 2) ?></td>
+          <td class="num"><?= $noHist ? '—' : number_format($r['G'], 2) ?></td>
+          <td class="num"><?= $noHist ? '—' : number_format($r['par'], 1) ?></td>
           <td class="num"><?php
               // "Ignore In Stock" recommends as if nothing is on hand, so show
               // every In Stock value as 0 to match what the calculation used —
@@ -415,33 +549,46 @@ renderNav('report');
                   ? (string)(int)round($dispStock)   // 'each' items are whole units
                   : number_format($dispStock, 1);
           ?></td>
-          <td class="num" style="font-weight:800; color:<?= $r['order']>0?'var(--red)':'#999' ?>;">
-            <?= $r['unit'] === 'each'
-                ? (int)ceil($r['order'])      // whole units only — round up so demand is fully covered
-                : number_format($r['order'], 1) ?>
+          <td class="num">
             <?php
-              // The column stays in the pantry's unit so it lines up with In
-              // Stock and the scans behind it. When the vendor orders in the
-              // other unit, show what that works out to — the number the Case
-              // Request below is actually derived from.
-              if ($r['order_unit'] !== $r['unit'] && $r['order'] > 0):
-                  $oqTxt = $r['order_unit'] === 'each'
-                      ? (int)ceil($r['order_qty']) . ' count'
-                      : number_format($r['order_qty'], 1) . ' ' . $r['order_unit'];
+              // Every row's request is editable, whether the forecast produced
+              // one or not. A recommendation is a starting point — the operator
+              // knows about the truckload arriving Thursday, the event next
+              // week, and what the vendor will actually sell today — and what
+              // ends up in this box is what the email, the print sheet and
+              // Restock Now all carry. data-calc keeps the figure the forecast
+              // asked for so an override can be shown as such and put back.
+              $hint = 'Order Request in ' . $r['unit'] . ', editable';
+              if ($noHist) {
+                  $hint = 'Never scanned, so there is no forecast for this item. '
+                        . 'Type a quantity in ' . $r['unit'] . ' to order it';
+              }
+              if ($r['order_unit'] !== $r['unit']) {
+                  $hint .= ' — converts to ' . $r['order_unit'] . ' for the order at '
+                        . rtrim(rtrim(number_format($r['lb_per_each'], 3, '.', ''), '0'), '.')
+                        . ' lb each';
+              }
+              $hint .= '.';
             ?>
-              <div style="font-weight:400; font-size:.75rem; color:#777;"
-                   title="Order Request converted to this item's Order Unit at <?= htmlspecialchars(rtrim(rtrim(number_format($r['lb_per_each'], 3, '.', ''), '0'), '.')) ?> lb each">
-                &asymp; <?= htmlspecialchars($oqTxt) ?>
-              </div>
-            <?php endif; ?>
+            <input type="number" class="order-qty" min="0" placeholder="0"
+                   step="<?= $r['unit'] === 'each' ? '1' : '0.1' ?>"
+                   value="<?= htmlspecialchars($reqValue) ?>"
+                   data-calc="<?= htmlspecialchars($reqValue) ?>"
+                   aria-label="Order Request for <?= htmlspecialchars($r['name']) ?>, in <?= htmlspecialchars($r['unit']) ?>"
+                   title="<?= htmlspecialchars($hint) ?>">
+            <?php // Filled by the JS below: the request in the vendor's unit,
+                  // whenever that differs from the unit the pantry stocks in. ?>
+            <div class="order-conv"></div>
           </td>
           <td><?= htmlspecialchars($r['unit']) ?></td>
           <td class="num" style="font-weight:800;">
             <?php
-              // "—" when Count/Case isn't set on the Inventory page; 0 when
-              // it is set but nothing needs ordering.
-              if ($r['cpc'] <= 0)      echo '—';
-              else                     echo (int)$r['cases'];
+              // "—" when Count/Case isn't set on the Inventory page. Otherwise a
+              // span the JS rewrites from the Order Request field as it changes:
+              // whole cases are what the vendor is actually asked for, so an
+              // edit has to show its round-up before the order goes out.
+              if ($r['cpc'] <= 0) echo '—';
+              else                echo '<span class="case-req">' . (int)$r['cases'] . '</span>';
             ?>
           </td>
         </tr>
@@ -536,6 +683,43 @@ function applyRepFilter() {
   });
   document.getElementById('repCount').textContent =
     q ? (shown + ' matching') : (shown + ' items');
+  syncRestockMaster();
+}
+
+// The header's master Restock box works on the rows the filter is currently
+// showing, not the whole table: with a filter typed, the visible list is the one
+// the operator is working, and ticking items they can't see would put them in
+// the order unseen. With the search box empty — the usual case — that is every
+// row. Note the reverse of the same rule: clearing the box under a filter leaves
+// any checked row that is filtered out still checked, and still in the order.
+function visibleRestockBoxes() {
+  var out = [];
+  document.querySelectorAll('#repTable tbody tr').forEach(function (tr) {
+    if (tr.style.display === 'none') return;
+    var cb = tr.querySelector('.restock-cb');
+    if (cb) out.push(cb);
+  });
+  return out;
+}
+
+function toggleAllRestock(master) {
+  visibleRestockBoxes().forEach(function (cb) { cb.checked = master.checked; });
+  master.indeterminate = false;
+  updateCrateTotal();
+}
+
+// Keep the header box honest about the column under it: checked when every
+// visible row is, indeterminate on a mixed set, clear when none are. Called
+// after anything that ticks a box or changes which rows are visible — including
+// the page-load pass, since Produce Only ships rows pre-checked.
+function syncRestockMaster() {
+  var master = document.getElementById('restockAll');
+  if (!master) return;
+  var boxes = visibleRestockBoxes();
+  var checked = boxes.filter(function (cb) { return cb.checked; }).length;
+  master.checked       = (boxes.length > 0 && checked === boxes.length);
+  master.indeterminate = (checked > 0 && checked < boxes.length);
+  master.disabled      = (boxes.length === 0);
 }
 
 // Email subject, with the pantry name appended server-side when set.
@@ -546,25 +730,86 @@ var ORDER_SUBJECT = <?= json_encode($orderSubject, JSON_HEX_TAG | JSON_HEX_APOS 
 // data-* attributes, so both the email and the inventory restock reflect
 // exactly what's checked at click time.
 //
-// Every unit conversion is already done server-side in report_lib.php:
-// orderQty is the request in the vendor's unit and restockQty is what the
-// cases put back on the shelf in the pantry's unit. Nothing here converts.
-// For items with no separate order unit, orderUnit/orderQty are just unit
-// and order, so all of this reads the same for them as it always did.
+// Every row's Order Request is editable, so the quantity that matters only ever
+// exists in the browser. The server sends the conversion inputs — the item's
+// stock unit, order unit, weight per piece, case size, cubic feet per case — and
+// deriveOrder() below runs report_lib.php's own conversion chain over whatever
+// the field currently holds. Nothing downstream of gatherCheckedItems (email
+// lines, print sheet, Restock Now, the cu ft tally) knows or cares whether that
+// number came from the forecast or from the operator.
+function orderInputFor(cb) {
+  var tr = cb.closest('tr');
+  return tr ? tr.querySelector('input.order-qty') : null;
+}
+
+// Port of op_convert_qty() in report_lib.php: cross a quantity between the only
+// two units the app knows, using the item's average weight per piece. null when
+// the units differ and no factor is set — genuinely unknown, so callers fall
+// back to the stock unit rather than invent a number.
+function opConvert(qty, from, to, lbPerEach) {
+  if (from === to)      return qty;
+  if (!(lbPerEach > 0)) return null;
+  if (from === 'each' && to === 'lb')   return qty * lbPerEach;
+  if (from === 'lb'   && to === 'each') return qty / lbPerEach;
+  return null;
+}
+
+// Fill in an item's vendor-facing figures from its Order Request, following
+// report_lib.php step for step: stock unit → order unit → whole cases (ceil, so
+// 5.25 cases of avocados becomes 6) → cu ft, then back to the stock unit for
+// what those cases actually put on the shelf.
+function deriveOrder(it, qty) {
+  if (!(qty > 0)) qty = 0;
+  it.order = qty;
+  var oq = opConvert(qty, it.unit, it.orderUnit, it.lbPerEach);
+  if (oq === null) {          // half-configured item — stay in the stock unit
+    it.orderUnit = it.unit;
+    oq = qty;
+  }
+  it.orderQty = oq;
+  it.cases    = (it.cpc > 0 && oq > 0) ? Math.ceil(oq / it.cpc) : 0;
+  if (it.cpc > 0) {
+    var back = opConvert(it.cases * it.cpc, it.orderUnit, it.unit, it.lbPerEach);
+    it.restockQty = (back === null) ? it.cases * it.cpc : back;
+  } else {
+    it.restockQty = qty;
+  }
+  it.orderCrates = it.hasCrates ? it.cases * it.cratesPer : 0;
+  return it;
+}
+
+// One row's order figures: the item's fixed conversion data from the checkbox,
+// everything else derived from whatever its Order Request field holds right now.
+function itemFromCb(cb) {
+  var it = {
+    name:       cb.dataset.name,
+    cpc:        parseFloat(cb.dataset.cpc) || 0,
+    unit:       cb.dataset.unit,
+    orderUnit:  cb.dataset.orderUnit || cb.dataset.unit,
+    altCase:    (cb.dataset.altCase || '').trim(),
+    hasCrates:  cb.dataset.hasCrates === '1',
+    lbPerEach:  parseFloat(cb.dataset.lbPerEach) || 0,
+    cratesPer:  parseFloat(cb.dataset.cratesPerCase) || 0
+  };
+  var input = orderInputFor(cb);
+  return deriveOrder(it, input ? parseFloat(input.value) : 0);
+}
+
+// Sorted by name, not left in table order. The table sorts by order request so
+// the biggest needs are on top, but an order sheet is read against a shelf or a
+// vendor's catalogue, where alphabetical is what makes an item findable — and a
+// list whose order shifts with every recalculation is hard to check twice.
+// Sorting here rather than in the email keeps the email, the print sheet, and
+// Restock Now on one order, which is the point of them sharing this function.
+// Case-insensitive, and numeric so "Bag 2" precedes "Bag 10".
 function gatherCheckedItems() {
   var out = [];
   document.querySelectorAll('.restock-cb:checked').forEach(function (cb) {
-    out.push({
-      name:       cb.dataset.name,
-      cases:      parseInt(cb.dataset.cases, 10) || 0,
-      cpc:        parseFloat(cb.dataset.cpc) || 0,
-      unit:       cb.dataset.unit,
-      order:      parseFloat(cb.dataset.order) || 0,
-      orderUnit:  cb.dataset.orderUnit || cb.dataset.unit,
-      orderQty:   parseFloat(cb.dataset.orderQty) || 0,
-      restockQty: parseFloat(cb.dataset.restockQty) || 0,
-      altCase:    (cb.dataset.altCase || '').trim()
-    });
+    out.push(itemFromCb(cb));
+  });
+  out.sort(function (a, b) {
+    return String(a.name).localeCompare(String(b.name), undefined,
+                                        { sensitivity: 'base', numeric: true });
   });
   return out;
 }
@@ -579,6 +824,74 @@ function hasOrder(it) {
 }
 
 function fmtNum(n) { return parseFloat(Number(n).toFixed(2)).toString(); }
+
+// Shown when nothing ticked has a quantity behind it.
+var NO_ORDER_MSG = 'No checked items have an order request greater than 0. '
+  + 'Type a quantity into an item’s Order Request box to order it.';
+
+// Order Request as the vendor reads it, with the same rounding the order lines
+// use so a row's ≈ line and its email line can't disagree.
+function orderQtyText(it) {
+  return it.orderUnit === 'each'
+    ? Math.ceil(it.orderQty) + ' count'
+    : fmtNum(Math.round(it.orderQty * 10) / 10) + ' ' + it.orderUnit;
+}
+
+// Repaint one row's derived figures from its Order Request field: the ≈
+// order-unit line under the field and the Case Request beside it, so the row on
+// screen always shows the vendor figures the order will carry — including the
+// round up to a whole case. Also flags the field when it no longer holds the
+// forecast's own number, since an override is worth seeing before the order
+// goes out; the tooltip carries the original so it can be put back.
+function repaintRow(tr) {
+  var cb = tr.querySelector('.restock-cb');
+  var input = tr.querySelector('input.order-qty');
+  if (!cb || !input) return null;
+  var it = itemFromCb(cb);
+
+  var conv = tr.querySelector('.order-conv');
+  if (conv) {
+    var crossesOver = (it.orderUnit !== it.unit && it.order > 0);
+    conv.textContent = crossesOver ? '≈ ' + orderQtyText(it) : '';
+    conv.title = crossesOver
+      ? 'Order Request converted to this item’s Order Unit'
+      : '';
+  }
+  // Only present when a Count/Case is set; without one the cell stays "—".
+  var caseCell = tr.querySelector('.case-req');
+  if (caseCell) caseCell.textContent = String(it.cases);
+
+  // Stash the server-rendered tooltip on first paint so it can be restored when
+  // an override is undone (cheaper than shipping it twice per row).
+  if (input.dataset.hint === undefined) input.dataset.hint = input.title;
+  // dataset.calc is '' for rows the forecast asked nothing for, so typing into
+  // one of those counts as an override too — which is exactly what it is.
+  var calc = input.dataset.calc || '';
+  var edited = (input.value.trim() !== calc);
+  input.classList.toggle('edited', edited);
+  input.title = edited
+    ? 'Edited — the forecast asked for '
+      + (calc === '' ? 'nothing' : calc + ' ' + it.unit)
+      + '. Clear the box to drop this item from the order.'
+    : input.dataset.hint;
+  return it;
+}
+
+// Typing a quantity also ticks the row's Restock box: entering a number is the
+// intent to order the item, and leaving the box clear would silently drop it
+// from the very order it was typed for. Emptying the field doesn't untick — an
+// empty request contributes nothing anyway, and un-ticking under the operator
+// would fight whatever they set deliberately. Only ever called from the input
+// event, never on load: pre-filled recommendations must not tick themselves.
+function onOrderInput(input) {
+  var tr = input.closest('tr');
+  if (!tr) return;
+  var it = repaintRow(tr);
+  var cb = tr.querySelector('.restock-cb');
+  if (it && cb && it.order > 0 && !cb.checked) cb.checked = true;
+  updateCrateTotal();
+  syncRestockMaster();
+}
 
 // One email line per checked item, written entirely in the vendor's unit so
 // it can be read straight off the sheet onto an order form. With a
@@ -612,6 +925,61 @@ function restockQtyFor(it) {
   return it.unit === 'each' ? Math.ceil(it.order) : Math.round(it.order * 100) / 100;
 }
 
+// ── Storage capacity ────────────────────────────────────────────────────────
+// Max Storage (cu ft) from Settings (0 = no limit set) and the cubic feet already
+// on the floor, totalled server-side across every listed item with a Cu Ft/Case.
+var MAX_CRATES   = <?= (int)$maxCrates ?>;
+var STOCK_CRATES = <?= json_encode(round($stockCrates, 2)) ?>;
+
+function fmtCrates(n) {
+  return (Math.round(n * 10) / 10).toFixed(1);
+}
+
+// Cubic feet the ticked order needs, plus how many ticked items can't be counted
+// because they have no Cu Ft/Case (or no Count/Case to divide by). Restricted
+// to rows that would actually be ordered, so the total matches the email.
+function crateTally() {
+  var items = gatherCheckedItems().filter(hasOrder);
+  var incoming = 0, unconfigured = 0;
+  items.forEach(function (it) {
+    if (it.hasCrates) incoming += it.orderCrates;
+    else              unconfigured++;
+  });
+  return {
+    incoming:     incoming,
+    unconfigured: unconfigured,
+    total:        STOCK_CRATES + incoming,
+    over:         MAX_CRATES > 0 && (STOCK_CRATES + incoming) > MAX_CRATES
+  };
+}
+
+// Repaint the readout beside the table. Called on load and on every tick.
+function updateCrateTotal() {
+  var el = document.getElementById('crateTotal');
+  if (!el) return;
+  var t = crateTally();
+  // "on hand/on order" rather than "on hand": Restock Now is clicked when an
+  // order is placed, not when it lands, so the Inventory count this comes from
+  // is an inventory position — shelf plus whatever is still in transit. Saying
+  // "on hand" would read as the physical shelf and understate what has to fit.
+  var txt = 'Cu ft: ' + fmtCrates(STOCK_CRATES) + ' on hand/on order + '
+          + fmtCrates(t.incoming) + ' this order = ' + fmtCrates(t.total);
+  if (MAX_CRATES > 0) txt += ' of ' + MAX_CRATES;
+  if (t.over) {
+    txt = '⚠ ' + txt + ' — over by '
+        + fmtCrates(t.total - MAX_CRATES);
+  }
+  // An unconfigured item takes real floor space the total can't see, so say so
+  // rather than let the figure read as complete.
+  if (t.unconfigured > 0) {
+    txt += ' · ' + t.unconfigured + ' item'
+        + (t.unconfigured === 1 ? '' : 's') + ' with no Cu Ft/Case';
+  }
+  el.textContent = txt;
+  el.style.color      = t.over ? 'var(--red)' : '#777';
+  el.style.fontWeight = t.over ? '700' : '400';
+}
+
 function setOrderMsg(text, ok) {
   var el = document.getElementById('orderMsg');
   if (!el) return;
@@ -626,7 +994,25 @@ function generateOrderEmail() {
   // matching the value shown in the table's Order Request column.
   var items = gatherCheckedItems().filter(hasOrder);
   if (!items.length) {
-    alert('No checked items have an order request greater than 0.');
+    alert(NO_ORDER_MSG);
+    return;
+  }
+  // Last look at storage before the order leaves. A warning, never a block —
+  // going over may well be the right call, and only the person ordering knows.
+  // confirm() is synchronous and stays inside this click, so the window.open
+  // below is still treated as user-initiated and isn't popup-blocked.
+  var t = crateTally();
+  if (t.over && !confirm(
+        'This order needs ' + fmtCrates(t.incoming) + ' cu ft on top of the '
+        + fmtCrates(STOCK_CRATES) + ' already on hand or on order — '
+        + fmtCrates(t.total) + ' against a limit of ' + MAX_CRATES + ', over by '
+        + fmtCrates(t.total - MAX_CRATES) + '.\n\n'
+        + (t.unconfigured > 0
+            ? t.unconfigured + ' checked item'
+              + (t.unconfigured === 1 ? ' has' : 's have')
+              + ' no Cu Ft/Case set, so the real total is higher.\n\n'
+            : '')
+        + 'Send it anyway?')) {
     return;
   }
   var body = items.map(emailLineFor).join('\n');
@@ -645,7 +1031,7 @@ function printOrder() {
   // Match Email Order: drop anything whose Order Request rounds to 0.
   var items = gatherCheckedItems().filter(hasOrder);
   if (!items.length) {
-    alert('No checked items have an order request greater than 0.');
+    alert(NO_ORDER_MSG);
     return;
   }
   var esc = function (s) {
@@ -701,7 +1087,7 @@ function restockNow() {
   // case into inventory.
   items = items.filter(hasOrder);
   if (!items.length) {
-    setOrderMsg('No checked items have an order request greater than 0.', false);
+    setOrderMsg(NO_ORDER_MSG, false);
     return;
   }
   var fd = new FormData();
@@ -757,5 +1143,34 @@ function recordEmailOrderTime() {
     })
     .catch(function () { /* stamp just won't refresh until next reload */ });
 }
+
+// Keep the cu ft readout in step with the Restock boxes, and each row's derived
+// figures in step with its Order Request field. Both delegated from the table so
+// they cover every row without one listener each.
+//
+// The initial pass paints every row rather than trusting the server's figures:
+// the field is rounded to what the column displays, so deriving from it is what
+// makes the ≈ line and Case Request agree with the number actually on screen.
+// It also picks up values a browser refilled on reload or a back-button return.
+// It deliberately does NOT go through onOrderInput — that ticks Restock boxes,
+// and a page-load tick of every recommended row is not something the operator
+// asked for.
+(function () {
+  var tbl = document.getElementById('repTable');
+  if (tbl) {
+    tbl.addEventListener('change', function (e) {
+      if (e.target && e.target.classList.contains('restock-cb')) {
+        updateCrateTotal();
+        syncRestockMaster();
+      }
+    });
+    tbl.addEventListener('input', function (e) {
+      if (e.target && e.target.classList.contains('order-qty')) onOrderInput(e.target);
+    });
+    tbl.querySelectorAll('tbody tr').forEach(function (tr) { repaintRow(tr); });
+  }
+  updateCrateTotal();
+  syncRestockMaster();
+})();
 </script>
 <?php renderFoot(); ?>

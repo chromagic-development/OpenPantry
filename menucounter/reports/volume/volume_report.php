@@ -2,27 +2,59 @@
 require_once '../../db.php';
 $db = getDB();
 
-// ── Auth gate ─────────────────────────────────────────────────────────────────
-function makeAuthToken($password) {
-    return hash('sha256', 'fp_admin_' . $password);
-}
+// ── Auth gate: same persistent cookie as admin.php ───────────────────────────
+// Accepts either the administrator or the supervisor password — both mint the
+// cookie, and both open this page. See foodscanAuthCookieValid() in ../../db.php.
 function isAuthenticated($db) {
-    // admin_password lives in openpantry.db (see foodscanSetting() in ../../db.php).
-    $pw     = foodscanSetting('admin_password', 'admin');
-    $cookie = $_COOKIE['fp_admin_auth'] ?? '';
-    return $cookie !== '' && hash_equals(makeAuthToken($pw), $cookie);
+    return foodscanAuthCookieValid();
 }
 if (!isAuthenticated($db)) {
-    header('Location: ../admin/admin.php');
+    header('Location: ../../admin/admin.php');
     exit;
 }
 
-// ── Date range defaults (last 30 days) ───────────────────────────────────────
-$defaultEnd   = date('Y-m-d');
-$defaultStart = date('Y-m-d', strtotime('-30 days'));
+// ── Date range defaults (sticky Start Date, else trailing month) ─────────────
+// The last Start Date the user ran the report with is kept in a cookie and
+// becomes the default next visit. Only an explicit submission writes it, so a
+// report nobody has filtered keeps rolling forward on the trailing month rather
+// than freezing on whatever the first load happened to compute. Reset clears
+// it. Cookie name is report-specific so the two volume reports don't overwrite
+// each other; path '/' matches fp_admin_auth above.
+define('MC_START_COOKIE', 'fp_mcvol_start');
 
-$dateStart = $_GET['date_start'] ?? $defaultStart;
-$dateEnd   = $_GET['date_end']   ?? $defaultEnd;
+// Both the cookie and the query string are user-controlled, and a value
+// strtotime() can't parse would leave the zero-fill loop below starting from
+// 1970 and running for decades of rows, so everything goes through this first.
+function mcValidDate($v) {
+    if (!is_string($v) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) return false;
+    $d = DateTime::createFromFormat('Y-m-d', $v);
+    return $d !== false && $d->format('Y-m-d') === $v;
+}
+
+// Must run before any output — this both sets a cookie and redirects.
+if (isset($_GET['reset'])) {
+    @setcookie(MC_START_COOKIE, '', time() - 3600, '/');
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+    exit;
+}
+
+$defaultEnd   = date('Y-m-d');
+$defaultStart = date('Y-m-d', strtotime('-1 month'));
+
+$savedStart = $_COOKIE[MC_START_COOKIE] ?? '';
+if (mcValidDate($savedStart)) $defaultStart = $savedStart;
+
+$userStart = isset($_GET['date_start']) && mcValidDate($_GET['date_start'])
+    ? $_GET['date_start'] : null;
+
+$dateStart = $userStart !== null ? $userStart : $defaultStart;
+$dateEnd   = isset($_GET['date_end']) && mcValidDate($_GET['date_end'])
+    ? $_GET['date_end'] : $defaultEnd;
+
+if ($userStart !== null) {
+    @setcookie(MC_START_COOKIE, $userStart, time() + 365 * 24 * 3600, '/');
+    $_COOKIE[MC_START_COOKIE] = $userStart;
+}
 
 // ── Query: daily order count and item count ───────────────────────────────────
 $sql = "
@@ -182,7 +214,7 @@ $hasData = ($totalOrders > 0);
     </div>
     <div class="filter-footer">
       <button type="submit" class="btn btn-brown">📅 Run Report</button>
-      <a href="" class="btn btn-outline">↺ Reset</a>
+      <a href="?reset=1" class="btn btn-outline">↺ Reset</a>
       <?php if ($hasData): ?>
         <button type="button" class="btn btn-outline" onclick="window.print()" style="margin-left:auto;">🖨 Print</button>
       <?php endif; ?>
@@ -343,7 +375,7 @@ $hasData = ($totalOrders > 0);
 </div><!-- .page -->
 
 <footer style="text-align:center; padding:24px 16px; font-size:.78rem; color:#999; border-top:1px solid var(--border); margin-top:40px;">
-  &copy; 2026 <strong>Chromagic Development</strong> &mdash; OpenPantry, by
+  &copy; 2026 <strong>Chromagic Development</strong> &mdash;
   <strong>Bruce Alexander</strong>.
   Released under the
   <a href="../../../LICENSE" style="color:var(--brown); text-decoration:none;">MIT License</a>.

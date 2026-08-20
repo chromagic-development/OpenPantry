@@ -78,16 +78,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $msg = 'UPC and generic name are both required.';
             $msgKind = 'error';
         } else {
-            $exists = $db->prepare('SELECT 1 FROM upc_lookup WHERE upc = ?');
-            $exists->execute([$upc]);
-            if ($exists->fetchColumn()) {
+            // Let the insert itself decide whether the UPC was new. Checking
+            // with a SELECT first left a gap a scanning station could write
+            // into (lookup.php caches a UPC the moment someone scans it), and
+            // the follow-up INSERT then died on the primary key. rowCount()
+            // tells the two outcomes apart without the extra query.
+            $ins = $db->prepare(
+                "INSERT INTO upc_lookup (upc, brand_name, generic_name, source, created_at)
+                 VALUES (?, ?, ?, 'manual', ?)
+                 ON CONFLICT(upc) DO NOTHING"
+            );
+            $ins->execute([$upc, $brand, $gen, now()]);
+            if ($ins->rowCount() === 0) {
                 $msg = "UPC $upc is already cached — edit it in the table above.";
                 $msgKind = 'warn';
             } else {
-                $db->prepare(
-                    "INSERT INTO upc_lookup (upc, brand_name, generic_name, source, created_at)
-                     VALUES (?, ?, ?, 'manual', ?)"
-                )->execute([$upc, $brand, $gen, now()]);
                 $msg = "Added UPC $upc → $gen";
             }
         }

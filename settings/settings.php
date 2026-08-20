@@ -10,12 +10,23 @@ require_once __DIR__ . '/../mailer.php';                          // op_split_re
 requireLogin();
 $db = getDB();
 
+// A supervisor session (Settings -> Supervisor Password) reaches every page an
+// administrator does, but on THIS page it may only set the Public IPv4
+// Address. Everything else renders read-only, and the POST guard below refuses
+// every other action so the lock doesn't depend on the browser honoring it.
+$isSupervisor = fpIsSupervisor();
+
 $msg = null;
 $sysSaved = null;
 $sysError = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['fs_action'] ?? '';
-    if ($action === 'save_pantry_info') {
+    if ($isSupervisor && $action !== 'save_ip') {
+        // The one thing a supervisor may change here. Note this also catches
+        // the unnamed fall-through action at the end of the chain, which is
+        // what saves the OpenAI key and the par-level defaults.
+        $sysError = 'Supervisor access: only the Public IPv4 Address can be changed on this page.';
+    } elseif ($action === 'save_pantry_info') {
         // Food Pantry Name + optional logo upload. The name is saved
         // regardless; the logo is only replaced when a file is supplied.
         $name = trim((string)($_POST['food_pantry_name'] ?? ''));
@@ -102,6 +113,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 setSetting('admin_password', $pwHash);
                 fpSetAuthCookie($pwHash, FP_COOKIE_TTL);
                 $sysSaved = 'Administrator email address and password updated.';
+            }
+        }
+    } elseif ($action === 'save_supervisor_password' || $action === 'remove_supervisor_password') {
+        // Setting or clearing the supervisor password is an administrator act,
+        // so it takes the CURRENT ADMINISTRATOR password — not the supervisor
+        // one. That keeps a supervisor (or a walk-up at an unattended admin
+        // session) from minting or moving a second key to the building.
+        $adminStored = (string)(setting('admin_password', 'admin') ?? 'admin');
+        $curAdmin    = trim((string)($_POST['sup_admin_password'] ?? ''));
+        if (!fpVerifyAdminPassword($curAdmin, $adminStored)) {
+            $sysError = 'The administrator password is incorrect. The supervisor password was not changed.';
+        } elseif ($action === 'remove_supervisor_password') {
+            setSetting('supervisor_password', '');
+            $sysSaved = 'Supervisor password removed. Supervisor logins are now turned off.';
+        } else {
+            $newSup  = trim((string)($_POST['supervisor_new_password'] ?? ''));
+            $confSup = trim((string)($_POST['supervisor_confirm_password'] ?? ''));
+            if ($newSup === '' || $confSup === '') {
+                $sysError = 'Enter the new supervisor password in both boxes.';
+            } elseif ($newSup !== $confSup) {
+                $sysError = 'Supervisor passwords do not match.';
+            } elseif (fpVerifyAdminPassword($newSup, $adminStored)) {
+                // Logins test the admin password first, so an identical
+                // supervisor password would just be an admin login — the
+                // restricted role would be unreachable.
+                $sysError = 'The supervisor password must be different from the administrator password.';
+            } else {
+                // Stored as a one-way hash, like the admin password. Any
+                // supervisor currently signed in is logged out by the change,
+                // because the cookie token derives from this stored value.
+                setSetting('supervisor_password', fpHashAdminPassword($newSup));
+                $sysSaved = 'Supervisor password saved.';
             }
         }
     } elseif ($action === 'save_smtp') {
@@ -221,6 +264,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'default_lead_time' => ['min' => 1.0, 'max' => 365.0, 'int' => true,  'label' => 'Default Lead Time'],
             'safety_z'          => ['min' => 0.0, 'max' => 4.0,   'int' => false, 'label' => 'Safety Stock Z'],
             'velocity_window'   => ['min' => 7.0, 'max' => 365.0, 'int' => true,  'label' => 'Velocity Window'],
+            // 0 is meaningful here rather than merely permitted: it's how the
+            // capacity check is turned off. The Order Report still totals the
+            // cubic feet, it just has nothing to compare them against.
+            'max_storage_crates'=> ['min' => 0.0, 'max' => 100000.0, 'int' => true, 'label' => 'Max Storage (cu ft)'],
         ];
         $rejected = [];
         foreach ($numeric as $k => $spec) {
@@ -253,9 +300,12 @@ $model    = setting('openai_model', 'gpt-4o-mini');
 $lt       = setting('default_lead_time', '14');
 $z        = setting('safety_z', '1.65');
 $vw       = setting('velocity_window', '30');
+$maxCr    = setting('max_storage_crates', '0');
 $lastErr  = setting('last_openai_error', '');
 $hasCurl  = function_exists('curl_init');
 $tareOz   = setting('tare_oz', '0');
+
+$supervisorSet = fpSupervisorEnabled();
 
 // Administrator email + outbound-email (SMTP) settings.
 $adminEmail   = setting('admin_email', '') ?? '';
@@ -279,6 +329,19 @@ renderNav('settings');
 ?>
 <div class="container">
   <?php if ($msg): ?><div class="banner success">✅ <?= htmlspecialchars($msg) ?></div><?php endif; ?>
+
+  <?php if ($isSupervisor): ?>
+    <div class="banner warn">
+      <div style="font-size:1.2rem;">🔑</div>
+      <div>
+        <strong>Supervisor sign-in — this page is read-only.</strong> You can
+        set the <strong>Public IPv4 Address</strong> under Secure Network
+        Access (the <em>Use My Current IP</em> and <em>Set IP Address</em>
+        buttons); every other setting here is shown for reference only. Sign in
+        with the administrator password to change them.
+      </div>
+    </div>
+  <?php endif; ?>
 
   <!-- Security status. The admin password is always one-way hashed. The OpenAI
        key, allowed IP, and client address/city/phone are encrypted at rest with
@@ -387,9 +450,21 @@ renderNav('settings');
           <label for="vw">Velocity Window (days)</label>
           <input type="number" id="vw" name="velocity_window" min="7" max="365" value="<?= htmlspecialchars($vw) ?>">
         </div>
+        <div>
+          <label for="mxc" title="How many cubic feet of storage the pantry can hold. The Order Report adds up the cubic feet an order needs — from each item's Cu Ft/Case on the Inventory page — and warns when the total goes over. 0 turns the check off.">Max Storage (cu ft)</label>
+          <input type="number" id="mxc" name="max_storage_crates" min="0" max="100000" value="<?= htmlspecialchars($maxCr) ?>">
+        </div>
       </div>
       <p style="color:#777; font-size:.8rem; margin-top:8px;">
         Common Z values: 1.28 (90%), 1.65 (95%), 2.33 (99%).
+      </p>
+      <p style="color:#777; font-size:.8rem; margin-top:4px;">
+        <strong>Max Storage (cu ft)</strong> is the working capacity — what fits
+        with room left to move around, not what fits packed solid. Enter it in
+        cubic feet, the same unit used for every item's
+        <strong>Cu Ft/Case</strong> on the
+        <a href="../inventory/">Inventory</a> page. 0 = no limit, and the Order
+        Report just reports the total without warning about it.
       </p>
 
       <div style="margin-top:18px;">
@@ -409,7 +484,7 @@ renderNav('settings');
       public IPv4 address (your pantry's WiFi). Leave blank to disable the check.
       Your current detected IP is <strong><?= htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '') ?></strong>.
     </p>
-    <form method="post">
+    <form method="post" id="ipForm">
       <input type="hidden" name="fs_action" value="save_ip">
       <label for="allowed_ip">Public IPv4 Address</label>
       <div class="row">
@@ -482,6 +557,7 @@ renderNav('settings');
     </form>
   </div>
 
+  <?php if (!$isSupervisor): // password cards are administrator-only ?>
   <div class="card">
     <h2>🔑 Administrator Email Address &amp; Password</h2>
     <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
@@ -525,6 +601,67 @@ renderNav('settings');
       </div>
     </form>
   </div>
+
+  <!-- ── Supervisor Password ───────────────────────────────────────
+       A second shared password with the same reach as the administrator
+       one, minus the ability to change anything on this page except the
+       Public IPv4 Address. Meant for the person who opens the pantry: they
+       can re-point Secure Network Access at today's WiFi address without
+       being handed the keys to the OpenAI key, the email settings, or the
+       passwords themselves. -->
+  <div class="card">
+    <h2>🔑 Supervisor Password</h2>
+    <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
+      An optional second login. A supervisor reaches every page and report the
+      administrator password opens — PantryPrep, FoodScan, Inventory, Delivery,
+      the reports — but on this Settings page they can only use
+      <strong>Use My Current IP</strong> and <strong>Set IP Address</strong>
+      under Secure Network Access. Everything else here is read-only for them.
+      Leave it unset to turn supervisor logins off entirely.
+    </p>
+    <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
+      Status:
+      <?php if ($supervisorSet): ?>
+        <strong style="color:#276437;">A supervisor password is set.</strong>
+        Saving a new one below replaces it and signs out anyone currently using it.
+      <?php else: ?>
+        <strong>No supervisor password is set</strong> — supervisor sign-in is off.
+      <?php endif; ?>
+    </p>
+    <form method="post">
+      <div style="margin-bottom:12px;">
+        <label for="sup_admin_password">Current Administrator Password</label>
+        <input type="password" id="sup_admin_password" name="sup_admin_password"
+               placeholder="Required to set or remove the supervisor password"
+               autocomplete="off" oninput="checkSupMatch()">
+      </div>
+      <div style="margin-bottom:12px;">
+        <label for="supervisor_new_password">New Supervisor Password</label>
+        <input type="password" id="supervisor_new_password" name="supervisor_new_password"
+               placeholder="<?= $supervisorSet ? 'Leave blank to keep the current one' : 'Choose a supervisor password' ?>"
+               autocomplete="new-password" oninput="checkSupMatch()">
+      </div>
+      <div style="margin-bottom:12px;">
+        <label for="supervisor_confirm_password">Retype Supervisor Password</label>
+        <input type="password" id="supervisor_confirm_password" name="supervisor_confirm_password"
+               placeholder="Retype supervisor password"
+               autocomplete="new-password" oninput="checkSupMatch()">
+      </div>
+      <div class="row" style="align-items:center;">
+        <button type="submit" name="fs_action" value="save_supervisor_password"
+                id="supSubmitBtn" class="btn btn-primary">Save Supervisor Password</button>
+        <?php if ($supervisorSet): ?>
+          <button type="submit" name="fs_action" value="remove_supervisor_password"
+                  class="btn btn-secondary"
+                  onclick="return confirm('Remove the supervisor password? Supervisor sign-in will be turned off and anyone signed in that way is logged out.');">
+            Remove Supervisor Password
+          </button>
+        <?php endif; ?>
+        <span id="supMatchMsg" style="font-size:.85rem;"></span>
+      </div>
+    </form>
+  </div>
+  <?php endif; // !$isSupervisor ?>
 
   <!-- ── Email Notifications (SMTP) ─────────────────────────────────
        Outbound email for reorder reminders. Leave SMTP Host blank to use
@@ -774,7 +911,9 @@ renderNav('settings');
     <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
       Container weight, in ounces, subtracted from the value entered in the
       “Weight required” window when adding an item to an order. Set to 0 for
-      no tare.
+      no tare. Weights the scale sends by itself are left alone — the scale is
+      zeroed on its own container, so subtracting this again would double-count
+      it.
     </p>
     <form method="post">
       <input type="hidden" name="fs_action" value="save_tare">
@@ -805,6 +944,26 @@ function checkPwMatch() {
     msg.textContent = '✗ Passwords do not match'; msg.style.color = '#8B1A1A'; btn.disabled = true;
   } else if (!cur) {
     msg.textContent = '🔑 Enter your current password to change it'; msg.style.color = '#8B1A1A'; btn.disabled = true;
+  } else {
+    msg.textContent = '✅ Passwords match'; msg.style.color = '#276437'; btn.disabled = false;
+  }
+}
+
+// Same live check for the Supervisor Password card. Both boxes must match and
+// the administrator password is required before the Save button unlocks. The
+// card is absent for a supervisor session, hence the null guard.
+function checkSupMatch() {
+  var adm = document.getElementById('sup_admin_password');
+  var p1  = document.getElementById('supervisor_new_password');
+  var p2  = document.getElementById('supervisor_confirm_password');
+  var btn = document.getElementById('supSubmitBtn');
+  var msg = document.getElementById('supMatchMsg');
+  if (!adm || !p1 || !p2 || !btn || !msg) return;
+  if (!p1.value && !p2.value) { msg.textContent = ''; btn.disabled = true; return; }
+  if (p1.value !== p2.value) {
+    msg.textContent = '✗ Passwords do not match'; msg.style.color = '#8B1A1A'; btn.disabled = true;
+  } else if (!adm.value) {
+    msg.textContent = '🔑 Enter the administrator password to save'; msg.style.color = '#8B1A1A'; btn.disabled = true;
   } else {
     msg.textContent = '✅ Passwords match'; msg.style.color = '#276437'; btn.disabled = false;
   }
@@ -859,4 +1018,20 @@ document.getElementById('btnTest').addEventListener('click', async () => {
   }
 });
 </script>
+<?php if ($isSupervisor): ?>
+<script>
+// Supervisor session: the Public IPv4 Address form is the only editable thing
+// on this page. Disabling the rest is a courtesy so nobody types into a field
+// that won't save — settings.php refuses every action but save_ip regardless.
+(function () {
+  var forms = document.querySelectorAll('form');
+  for (var i = 0; i < forms.length; i++) {
+    if (forms[i].id === 'ipForm') continue;
+    var fields = forms[i].querySelectorAll('input, select, textarea, button');
+    for (var j = 0; j < fields.length; j++) fields[j].disabled = true;
+    forms[i].addEventListener('submit', function (e) { e.preventDefault(); });
+  }
+})();
+</script>
+<?php endif; ?>
 <?php renderFoot(); ?>

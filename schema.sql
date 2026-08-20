@@ -29,12 +29,32 @@ CREATE TABLE IF NOT EXISTS scans (
     quantity      INTEGER NOT NULL DEFAULT 1,
     weight_lbs    REAL,
     scanned_at    TEXT    NOT NULL,
+    -- Which scanning station entered this row, for team scanning (two stations
+    -- sharing one order). '' when recorded before stations were tracked, or by
+    -- a non-scan channel — delivery / event / orderahead write their scans
+    -- directly and have no station.
+    station       TEXT    NOT NULL DEFAULT '',
     FOREIGN KEY (order_id) REFERENCES orders(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_scans_order   ON scans(order_id);
 CREATE INDEX IF NOT EXISTS idx_scans_generic ON scans(generic_name);
 CREATE INDEX IF NOT EXISTS idx_scans_when    ON scans(scanned_at);
+
+-- Team scanning: a station that has joined *another* station's open order to
+-- help check the same household out. One row per helper station per order;
+-- deleting the row ends the assist. The order's owner stays orders.station —
+-- only the owner can End or Cancel it. Rows are cleared when the order closes.
+CREATE TABLE IF NOT EXISTS order_assists (
+    order_id   INTEGER NOT NULL,
+    station    TEXT    NOT NULL,   -- fs_station token of the helping device
+    joined_at  TEXT    NOT NULL,
+    PRIMARY KEY (order_id, station),
+    FOREIGN KEY (order_id) REFERENCES orders(id)
+);
+
+-- Looked up by station on every scan (activeScanOrder), so index that side.
+CREATE INDEX IF NOT EXISTS idx_order_assists_station ON order_assists(station);
 
 -- Days the pantry operated but nothing was scanned (volunteer absent, station
 -- down, simply forgotten). These days are *unobserved*, not zero-demand: food
@@ -114,7 +134,13 @@ CREATE TABLE IF NOT EXISTS inventory (
     -- Email/Print order lines say "4 <alt_case> - Apples" in place of the
     -- default "4 cases - Apples (40 lb)" — it replaces the word case(s) and
     -- the trailing pack-size note, which the alt text already spells out.
-    alt_case            TEXT NOT NULL DEFAULT ''
+    alt_case            TEXT NOT NULL DEFAULT '',
+    -- Cubic feet one supplier case occupies on the pantry floor. 0 = not
+    -- set, which leaves the item out of the Order Report's capacity total
+    -- rather than guessing a factor for it. The Order Report compares the sum
+    -- against the max_storage_crates setting, so every item's figure has to be
+    -- measured the same way.
+    crates_per_case     REAL NOT NULL DEFAULT 0
 );
 
 -- Key/value settings: OpenAI key, default lead time, safety-stock Z, etc.

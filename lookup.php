@@ -8,7 +8,9 @@
 //        a. Try upc_lookup cache.
 //        b. Cache miss -> fetch OFF API. If no product, mark unknown.
 //        c. With a branded name in hand, ask OpenAI for a generic mapping.
-//        d. Insert into upc_lookup and return.
+//        d. Insert into upc_lookup and return. The insert tolerates a
+//           concurrent writer (ON CONFLICT DO NOTHING) — two stations can
+//           scan the same new UPC at once.
 
 require_once __DIR__ . '/db.php';
 
@@ -108,11 +110,30 @@ function lookupBarcode(string $code): array {
         $generic = ucwords(strtolower(trim(preg_replace('/\s+/', ' ', $brandName))));
     }
 
+    // Two stations can miss the cache on the same new UPC and then both sit in
+    // the OFF + OpenAI calls above for a few seconds, so by the time we write,
+    // the row may already be there. A bare INSERT raised a UNIQUE violation and
+    // 500'd the scan; first writer wins instead, the same DO NOTHING the manual
+    // path in api_scan.php uses.
     $ins = $db->prepare(
         'INSERT INTO upc_lookup (upc, brand_name, generic_name, source, created_at)
-         VALUES (?, ?, ?, ?, ?)'
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(upc) DO NOTHING'
     );
     $ins->execute([$code, $brandName, $generic, $source, now()]);
+    if ($ins->rowCount() === 0) {
+        // Someone beat us to it. Report what's actually stored rather than what
+        // we just computed, so this answer can't disagree with the cache every
+        // later scan of this UPC will read — the winner may have been a manual
+        // entry with a curated name.
+        $stmt = $db->prepare('SELECT brand_name, generic_name FROM upc_lookup WHERE upc = ?');
+        $stmt->execute([$code]);
+        if ($row = $stmt->fetch()) {
+            $brandName = $row['brand_name'];
+            $generic   = $row['generic_name'];
+            $source    = 'cache';
+        }
+    }
 
     return [
         'ok' => true, 'kind' => 'packaged', 'barcode' => $code,
