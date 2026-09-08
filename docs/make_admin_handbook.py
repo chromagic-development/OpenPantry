@@ -2,7 +2,7 @@
 #
 # Edit the story below and re-run (python make_admin_handbook.py) to publish a
 # new edition. Requires reportlab (pip install reportlab) and the Arial/Consolas
-# TTFs that ship with Windows; footprints-logo.jpg must sit next to this script.
+# TTFs that ship with Windows. The cover logo is optional - see find_logo().
 #
 # Design (Arial body, olive kickers, brown headings with a tan rule, colored
 # callout boxes, checkbox and numbered-step tables) lives in handbook_common.py,
@@ -33,7 +33,7 @@ cover_center = ParagraphStyle("cc", fontName="Arial", fontSize=10.5,
                               leading=16, textColor=HexColor("#555555"),
                               alignment=TA_CENTER)
 E.append(Spacer(1, 1.85 * inch))
-E.append(Image(LOGO, width=1.55 * inch, height=1.35 * inch))
+E.append(cover_logo())
 E.append(Spacer(1, 0.55 * inch))
 E.append(Paragraph(
     '<font face="Arial-Bold" size="30" color="#7cb342">Open</font>'
@@ -140,6 +140,20 @@ E.append(bullet("<b>Email notifications (SMTP)</b> — optional "
                 "delivery."))
 E.append(bullet("<b>Produce tare</b> — ounces subtracted from hand-typed "
                 "produce weights (not scale readings)."))
+# The USB scale is a one-time setup job that belongs to whoever sets up the
+# station, not to a volunteer mid-shift — so it lives here rather than in the
+# volunteer handbook, which only covers reading the strip.
+E.append(bullet("<b>USB scale pairing</b> — a HID Point-of-Sale scale (the "
+                "kind USPS postage software uses, e.g. the DYMO M25) plugs "
+                "straight into the station with no adapter or driver. Open the "
+                "scanning page in Chrome or Edge, click <b>Connect Scale</b> "
+                "once and pick the device; the browser remembers the grant, so "
+                "every later visit reconnects on its own. Do this once per "
+                "station and per browser profile — there is no app setting for "
+                "it. A station still using the older cable-connected scale needs "
+                "none of this: it types weights in as a keyboard would, "
+                "and the scale strip described in the Volunteer Handbook "
+                "never appears."))
 E.append(bullet("<b>Par-level defaults</b> — default lead time and "
                 "safety-stock Z used by the Order Now report."))
 E.append(bullet("<b>Food pantry name &amp; logo</b> — branding shown in "
@@ -253,6 +267,47 @@ E.append(bullet("<b>Add UPC Manually</b> — for codes Open Food Facts "
                 "the generic name, and the mapping is cached (source "
                 + code("manual") + ") for all future scans of that code."))
 
+E.append(Paragraph("Merging duplicate item names", S["h3"]))
+E.append(body("The generic name <i>is</i> the item — there is no id behind it "
+              "— so the same food can end up stored under two spellings. The "
+              "AI returns “Green beans” one week and “Green "
+              "Beans” the next; a produce code says “Squash "
+              "Zucchini” while a UPC says “Zucchini”; "
+              "someone retypes a name. Each variant then keeps its own scan "
+              "history, its own inventory row, and its own reorder alert, "
+              "which splits demand in half and <b>biases both par levels "
+              "low</b>. The <b>De-duplicate</b> tool merges them back "
+              "together. It is deliberately kept off the menu — browse to "
+              + code("/openpantry/deduplicate/") + " when you need it."))
+E.append(bullet("<b>Possible Duplicates</b> — names that match once case, "
+                "punctuation, word order, and plurals are ignored are grouped "
+                "for you. Click <b>keep</b> on the spelling you want and "
+                "<b>merge</b> on the one to fold into it."))
+E.append(bullet("<b>What a merge moves</b> — every scan (so the demand "
+                "history recombines), the UPC mappings and produce codes (so "
+                "future scans land on the kept name), the inventory row "
+                "(counts and lifetime restock totals are summed; the kept "
+                "row's unit, case size, and Order Unit settings win), and any "
+                "reorder alert. The duplicate then no longer exists."))
+E.append(bullet("<b>Renaming an item outright</b> — type a name in the "
+                "<b>or type a new name</b> box instead of picking one, and "
+                "the whole item moves to that spelling everywhere."))
+E.append(bullet("<b>“No barcode”</b> in the name table means no UPC "
+                "or produce code still resolves to that name, so nothing new "
+                "can be scanned into it. Usually a leftover from a rename — a "
+                "good merge candidate."))
+E.append(warn("A MERGE REWRITES HISTORY AND CANNOT BE UNDONE",
+    "Merging edits past scans, not just future ones — that is the point, but "
+    "there is no undo. Back up " + code("openpantry.db") + " before a big "
+    "cleanup session. The reorder report needs no attention afterward: forecast "
+    "fits are keyed to each item's scan history, so a merged item refits by "
+    "itself on the next report load."))
+E.append(good("MERGE BEFORE YOU TRUST A NEW ITEM'S PAR LEVEL",
+    "Duplicates are worth a look whenever an item you know is moving shows a "
+    "surprisingly low order need — a second spelling is quietly holding the "
+    "other half of its scans. The Menu Counter has its own separate "
+    "de-duplicate tool for the order-form items in its own database."))
+
 E.append(kicker("TURNING SCANS INTO DECISIONS"))
 E += h1("Reports &amp; the demand model")
 E.append(bullet("<b>Order Now</b> — the reorder report. Computes a Par "
@@ -263,6 +318,26 @@ E.append(bullet("<b>Item Usage</b> — per-item totals over a date range."))
 E.append(bullet("<b>Daily Volume</b> — orders and scans per day."))
 E.append(bullet("<b>Basket Size</b> — distribution of items per in-pantry "
                 "trip over time."))
+# The odd one out, and worth saying so: every other report answers an
+# operational question, this one answers a funder's.
+E.append(bullet("<b>Impact</b> — the report you hand a board member or a "
+                "grant officer: pounds distributed, households and people "
+                "reached, top items, and where the food came from, over a "
+                "window that defaults to the last 12 months. It is the only "
+                "report that reads <b>both</b> databases — scans and orders "
+                "from " + code("openpantry.db") + ", counter requests and "
+                "household sizes from " + code("picklist.db") + " — and it "
+                "keeps the two in separate sections rather than summing them, "
+                "because a request a household typed and food that left the "
+                "building are different events."))
+E.append(info("THE IMPACT REPORT'S TWO ASSUMPTIONS ARE YOURS TO SET",
+    "Packaged goods are counted, not weighed, so any pound figure covering "
+    "them rests on an assumed <b>average pound per packaged item</b>; the "
+    "meals-equivalent figure rests on an assumed <b>pounds per meal</b> "
+    "(Feeding America uses 1.2). Both sit at the top of the report as editable "
+    "inputs and are restated in its <b>Methodology &amp; Caveats</b> card, so "
+    "anyone reading the headline numbers can see what they depend on. Set them "
+    "to whatever your funder expects before you print."))
 E.append(Paragraph("How Par Level is computed", S["h3"]))
 E.append(body("For each item: <b>Par Level = Forecast(LeadTime) + "
               "SafetyStock</b>, where <b>SafetyStock = Z × "
@@ -278,13 +353,17 @@ E.append(good("THE FORECAST CACHE IS DISPOSABLE",
     "Fits are memoized in the " + code("forecast_cache") + " table and rebuild "
     "on demand. If a report ever looks stale or wrong, that table is safe to "
     "delete — it will rebuild from the scan history."))
-E.append(Paragraph("Reorder alerts &amp; email", S["h3"]))
-E.append(body("Set a per-item lead-time alert and it shows as a banner on "
-              "Order Now when projected days-of-stock drop below the "
-              "threshold. Tick its <b>Email</b> box to also have it emailed. "
-              "The cron job (" + code("cron_reorder_alerts.php") + ") mails a "
-              "digest of triggered, email-flagged items to the administrator "
-              "address, at most once per ~20 hours per item."))
+# Bound to its paragraph: adding the Impact report above pushed this subhead
+# to the foot of the page, where it sat alone with its text overleaf.
+E.append(KeepTogether([
+    Paragraph("Reorder alerts &amp; email", S["h3"]),
+    body("Set a per-item lead-time alert and it shows as a banner on "
+         "Order Now when projected days-of-stock drop below the "
+         "threshold. Tick its <b>Email</b> box to also have it emailed. "
+         "The cron job (" + code("cron_reorder_alerts.php") + ") mails a "
+         "digest of triggered, email-flagged items to the administrator "
+         "address, at most once per ~20 hours per item."),
+]))
 E.append(PageBreak())
 
 # ================================================================ cron
@@ -313,7 +392,9 @@ E.append(bullet("<b>Pick queue (Orders)</b> — the live back-of-house "
                 "dashboard volunteers pull from; auto-refreshes every 30 "
                 "seconds."))
 E.append(bullet("<b>Deduplicate</b> — merge duplicate item rows that "
-                "crept in over time."))
+                "crept in over time. This one is the Menu Counter's own "
+                "order-form items; the item-name merge tool under Lookup "
+                "Tables is a separate page for a separate database."))
 E.append(bullet("<b>Reports</b> — item-usage reports with a chart; "
                 "shoppers are anonymized as “Client N.”"))
 E.append(bullet("The Menu Counter shares the same login, allowed-IP, and "
@@ -361,6 +442,10 @@ E.append(bullet("<b>No email arriving?</b> Verify the admin email and SMTP in "
 E.append(bullet("<b>New barcode saved with a raw name?</b> The OpenAI step was "
                 "skipped (bad/rate-limited key). Fix the key and edit the name "
                 "under Lookup Tables."))
+E.append(bullet("<b>Same item listed twice in a report?</b> Two spellings of "
+                "one generic name. Merge them at "
+                + code("/openpantry/deduplicate/") + ", which also recombines "
+                "the split scan history the par levels are built from."))
 E.append(bullet("<b>“Access Denied” for legitimate staff?</b> The "
                 "public Wi-Fi IP changed or you're outside allowed hours. "
                 "Update the allowed IP in Settings."))

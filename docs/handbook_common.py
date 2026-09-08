@@ -13,6 +13,8 @@
 # callout boxes (blue info / red warning / green good-to-know), checkbox and
 # numbered-step tables for the station checklists.
 import os
+import re
+import sys
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -21,13 +23,46 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Image,
+    BaseDocTemplate, PageTemplate, Frame, Paragraph as _Paragraph, Spacer, Image,
     Table, TableStyle, HRFlowable, PageBreak, KeepTogether,
 )
 from reportlab.lib.styles import ParagraphStyle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-LOGO = os.path.join(HERE, "footprints-logo.jpg")
+# Cover logo. The repo ships Footprints' own as the sample asset, so a hard
+# reference to it puts one pantry's branding on every other pantry's handbook.
+# Search generic locations first, ending at the app's live header logo — the one
+# an admin has already replaced through Settings -> Appearance — and render the
+# cover without an image rather than failing if there is none. The OpenPantry
+# wordmark below it carries the identity either way.
+#
+# Override explicitly with OPENPANTRY_LOGO=/path/to/logo.jpg.
+LOGO_CANDIDATES = [
+    os.environ.get("OPENPANTRY_LOGO", ""),
+    os.path.join(HERE, "logo.jpg"),
+    os.path.join(HERE, os.pardir, "logo.jpg"),
+    os.path.join(HERE, "footprints-logo.jpg"),
+]
+
+
+def find_logo():
+    """First readable candidate, or None. Reported at build time, never guessed at."""
+    for path in LOGO_CANDIDATES:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return None
+
+
+LOGO = find_logo()
+print("cover logo: %s" % (LOGO or "none found - cover will use the wordmark only"))
+
+
+def cover_logo(width=1.55 * inch, height=1.35 * inch):
+    """The cover image, or blank space of the same height when none is found,
+    so the rest of the cover keeps its spacing either way."""
+    if LOGO:
+        return Image(LOGO, width=width, height=height)
+    return Spacer(1, height)
 
 # ---------------------------------------------------------------- fonts
 FONTS = r"C:\Windows\Fonts"
@@ -39,6 +74,41 @@ pdfmetrics.registerFontFamily(
     "Arial", normal="Arial", bold="Arial-Bold",
     italic="Arial-Italic", boldItalic="Arial-BoldItalic")
 pdfmetrics.registerFont(TTFont("Consolas", os.path.join(FONTS, "consola.ttf")))
+
+# Arial carries neither U+2696 (the scale glyph) nor U+26A0 (the warning
+# triangle), and ReportLab draws a character its font lacks as an empty box
+# without saying a word — so the scale-strip messages reprinted from the Scan
+# page came out as tofu. Segoe UI Symbol has both. It is used only for those
+# characters, not for running text, and it is the monochrome font on purpose:
+# Segoe UI Emoji covers the same code points but would drop full-color pictures
+# into a two-color print book.
+try:
+    pdfmetrics.registerFont(TTFont("Symbols", os.path.join(FONTS, "seguisym.ttf")))
+    HAVE_SYMBOLS = True
+except Exception as err:                       # no Segoe UI Symbol on this box
+    sys.stderr.write("warning: symbol font unavailable (%s); "
+                     "the scale and warning glyphs will print as boxes\n" % err)
+    HAVE_SYMBOLS = False
+
+_SYMBOL_RE = re.compile("([⚖⚠]+)")
+
+def symbolize(t):
+    """Switch the glyphs Arial is missing onto the symbol font.
+
+    Applied centrally by Paragraph() below rather than by hand at each use, so
+    a scale message pasted in from the Scan page renders correctly without the
+    author having to know which characters Arial happens to lack."""
+    if not HAVE_SYMBOLS:
+        return t
+    return _SYMBOL_RE.sub(r'<font face="Symbols">\1</font>', t)
+
+def Paragraph(text, *args, **kw):
+    """Drop-in for the ReportLab class, with the symbol swap applied.
+
+    Every paragraph in both handbooks is built through here (the two make_*
+    scripts import this name, not ReportLab's), which is what keeps the swap
+    from having to be repeated at ~20 call sites."""
+    return _Paragraph(symbolize(text), *args, **kw)
 
 # ---------------------------------------------------------------- palette
 OLIVE      = HexColor("#7d9a2d")   # kickers
@@ -180,7 +250,7 @@ def cover(subtitle, badge_text, blurb, revision):
                         leading=16, textColor=HexColor("#555555"),
                         alignment=TA_CENTER)
     E = [Spacer(1, 1.85 * inch),
-         Image(LOGO, width=1.55 * inch, height=1.35 * inch),
+         cover_logo(),
          Spacer(1, 0.55 * inch),
          Paragraph('<font face="Arial-Bold" size="30" color="#7cb342">Open</font>'
                    '<font face="Arial-Bold" size="30" color="#5d4a12">Pantry</font>',
@@ -225,8 +295,9 @@ def scanning_station_checklist():
                       "network) if it is not already connected."))
     E.append(checkrow("Make sure the handheld barcode scanner is connected to "
                       "the tablet; wait for its ready beep / steady LED."))
-    E.append(checkrow("Power on the produce scale and complete the “PC” "
-                      "setup below if it is not already set."))
+    E.append(checkrow("Power on the produce scale and confirm the scale "
+                      "strip reads <b>Scale ready</b>; see the setup "
+                      "below if it does not."))
     # One page for both input methods now: the old Scan (Camera) menu entry is
     # gone, and the camera is a button on this same page.
     E.append(checkrow("Open the browser and go to the OpenPantry <b>Scan</b> "
@@ -245,32 +316,46 @@ def scanning_station_checklist():
         "chirps once for each code it reads. <b>Stop Camera</b> puts it away. "
         "The camera needs permission the first time, and the page must be "
         "opened over <b>https</b>."))
-    # Its own page: the six-step table plus its callout does not fit under the
-    # checkboxes, and letting it flow splits the table across a page break.
+    # Its own page: the six-step table plus its two callouts does not fit under
+    # the checkboxes, and letting it flow splits the table across a page break.
     E.append(PageBreak())
     E.append(kicker("CHECKOUT · THE PRODUCE SCALE"))
-    E += h1("Configuring the produce scale (one-time, each power-on)")
-    E.append(body("The VEVOR scale with RS232 Port connects to the tablet as a USB "
-                  "keyboard. After you power it on it must be switched into "
-                  "<b>“PC” mode</b> so it types weights straight into "
-                  "OpenPantry. Do this every time the scale is powered up:"))
+    E += h1("Setting up the produce scale (once per tablet)")
+    E.append(body("The <b>DYMO M25</b> is a USB scale. It plugs into the tablet "
+                  "and sends its readings to OpenPantry on its own — there is "
+                  "no keypad sequence to enter, no mode to select, and no unit "
+                  "to set, because the station converts whatever unit the scale "
+                  "displays into pounds. All it needs is power and, the first "
+                  "time on a given tablet, the browser's permission:"))
     E.append(Spacer(1, 4))
     E.append(steptable([
-        ("Power on the scale and let it settle to <b>0</b>.", "Zero / stable reading"),
-        ("Press the <b>[ . ]</b> (period / decimal) key.", "Enters setup"),
-        ("Wait until the display reads <b>“Entr”</b>.", "Ready for unit"),
-        ("Press <b>[ 2 ]</b> to set the unit to <b>“lb”</b>.", "Unit = lb"),
-        ("Press <b>[ . ]</b> (period), then press <b>[ 9 ]</b>.", "Selects PC interface"),
-        ("Confirm the weight window shows <b>“PC”</b>.", "Interfaced to OpenPantry"),
+        ("Stand the scale on a flat, dry surface with nothing on the platform.",
+         "Nothing on the platform"),
+        ("Plug its USB cable into the tablet.", "Connected to the station"),
+        ("Press the scale's power key and let the display settle to <b>0</b>.",
+         "Zero / stable reading"),
+        ("On the <b>Scan</b> page, read the scale strip just above the barcode box.",
+         "Says what the scale is doing"),
+        ("If it says <b>Scale not connected</b>, tap <b>⚖ Connect Scale</b> and "
+         "pick the scale from the browser's list.", "Once per tablet only"),
+        ("Confirm the strip reads <b>⚖ Scale ready</b>.",
+         "Interfaced to OpenPantry"),
     ]))
     E.append(Spacer(1, 10))
-    E.append(good("WHEN YOU SEE “PC”, YOU'RE SET",
-        "That reading means the scale is now talking to OpenPantry. You can then "
-        "weigh produce in <b>either order</b> — scan the PLU and set the item "
-        "on the scale, or weigh it first and scan the PLU when the station asks "
-        "for it. If the window ever drops back to a plain weight, repeat the "
-        "steps above: in <b>print</b> mode the scale only sends when you press "
-        "<b>PRINT</b>, so weighing first won't work."))
+    E.append(good("WHEN THE STRIP SAYS “SCALE READY”, YOU'RE SET",
+        "That line means the station is hearing the scale. You can then weigh "
+        "produce in <b>either order</b> — scan the PLU and set the item on the "
+        "scale, or weigh it first and scan the PLU when the station asks for "
+        "it. You only ever tap <b>Connect Scale</b> once on a tablet: the "
+        "browser remembers the scale and reconnects by itself every later "
+        "shift."))
+    E.append(info("THE SCALE SWITCHES ITSELF OFF",
+        "The M25 powers down after a quiet spell to save its batteries, and a "
+        "scale that has shut off looks exactly like one nobody has touched. If "
+        "the strip says <b>⚠ Make sure scale is on.</b>, press the scale's "
+        "power key to wake it — you do <i>not</i> have to redo the steps "
+        "above. If the display is awake but not reading <b>0</b> with an empty "
+        "platform, press its <b>Tare</b> / <b>Zero</b> key."))
     return E
 
 def menu_counter_checklist():

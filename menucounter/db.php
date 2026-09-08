@@ -40,6 +40,18 @@ function foodscanSetting(string $key, ?string $default = null): ?string {
     }
 }
 
+// The public IPv4 addresses the network gate accepts — the primary one plus
+// the two optional extras (Settings -> Secure Network Access). Mirrors
+// fpAllowedIPs() in auth.php, read through this app's own settings reader.
+function foodscanAllowedIPs(): array {
+    $ips = [];
+    foreach (['allowed_ip', 'allowed_ip2', 'allowed_ip3'] as $key) {
+        $ip = trim((string)(foodscanSetting($key, '') ?? ''));
+        if ($ip !== '') $ips[] = $ip;
+    }
+    return $ips;
+}
+
 // ── Shared admin/supervisor auth cookie ──────────────────────────────────────
 // The PantryPrep pages here trust the same `fp_admin_auth` cookie FoodScan
 // issues (auth.php). Two passwords can mint it: `admin_password` and the
@@ -76,6 +88,23 @@ function foodscanAuthSeed(): ?string {
 
 function foodscanAuthCookieValid(): bool {
     return foodscanAuthSeed() !== null;
+}
+
+// 'admin', 'supervisor', or '' when the cookie is missing or stale. Mirrors
+// fpAuthRole() in ../../auth.php. Admin is tested first, so a supervisor
+// password set equal to the administrator's reads as an admin session.
+function foodscanAuthRole(): string {
+    $seed = foodscanAuthSeed();
+    if ($seed === null) return '';
+    $admin = (string)foodscanSetting('admin_password', 'admin');
+    if (hash_equals($admin, $seed)) return 'admin';
+    return 'supervisor';
+}
+
+// True when the visitor holds the cookie the SUPERVISOR password minted. Pages
+// here use it the way settings.php does: show the tool, withhold the writes.
+function foodscanIsSupervisor(): bool {
+    return foodscanAuthRole() === 'supervisor';
 }
 
 // One connection per request, opened on first use. Every page here calls

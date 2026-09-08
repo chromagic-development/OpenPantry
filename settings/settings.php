@@ -11,9 +11,11 @@ requireLogin();
 $db = getDB();
 
 // A supervisor session (Settings -> Supervisor Password) reaches every page an
-// administrator does, but on THIS page it may only set the Public IPv4
-// Address. Everything else renders read-only, and the POST guard below refuses
-// every other action so the lock doesn't depend on the browser honoring it.
+// administrator does, but on THIS page it may only set the primary Public IPv4 Address
+// and the Tare — the two things that change with the room and the scale rather
+// than with how the pantry itself is configured. Everything else renders
+// read-only, and the POST guard below refuses every other action so the lock
+// doesn't depend on the browser honoring it.
 $isSupervisor = fpIsSupervisor();
 
 $msg = null;
@@ -21,11 +23,11 @@ $sysSaved = null;
 $sysError = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['fs_action'] ?? '';
-    if ($isSupervisor && $action !== 'save_ip') {
-        // The one thing a supervisor may change here. Note this also catches
-        // the unnamed fall-through action at the end of the chain, which is
-        // what saves the OpenAI key and the par-level defaults.
-        $sysError = 'Supervisor access: only the Public IPv4 Address can be changed on this page.';
+    if ($isSupervisor && $action !== 'save_ip' && $action !== 'save_tare') {
+        // The only two things a supervisor may change here. Note this also
+        // catches the unnamed fall-through action at the end of the chain,
+        // which is what saves the OpenAI key and the par-level defaults.
+        $sysError = 'Supervisor access: only the primary Public IPv4 Address and the Tare can be changed on this page.';
     } elseif ($action === 'save_pantry_info') {
         // Food Pantry Name + optional logo upload. The name is saved
         // regardless; the logo is only replaced when a file is supplied.
@@ -58,9 +60,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sysSaved = 'Food pantry information saved.' . $logoMsg;
         }
     } elseif ($action === 'save_ip') {
+        // The primary address — the one a supervisor may re-point at today's
+        // WiFi. Deliberately its own action so the supervisor guard above can
+        // let this through while refusing the extras below.
         $ip = trim($_POST['allowed_ip'] ?? '');
         setSetting('allowed_ip', $ip);
         $sysSaved = 'IP address updated.';
+    } elseif ($action === 'save_ip_extra') {
+        // The two optional extras (a backup line, a second site). Administrator
+        // only: this action is NOT in the supervisor whitelist above, so a
+        // supervisor posting it lands on the refusal. Blanks are stored as
+        // blanks and simply drop out of the gate — see fpAllowedIPs().
+        foreach (['allowed_ip2', 'allowed_ip3'] as $ipKey) {
+            setSetting($ipKey, trim($_POST[$ipKey] ?? ''));
+        }
+        $sysSaved = 'Additional IP addresses updated.';
     } elseif ($action === 'save_access_schedule') {
         // Weekly allowed-hours window. Persisted as one JSON blob; the gate
         // helpers in auth.php (fpAccessSchedule / fpAccessTimeAllowed) read
@@ -247,6 +261,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tareOz = (is_numeric($t) && (float)$t > 0) ? (float)$t : 0.0;
         setSetting('tare_oz', (string)$tareOz);
         $sysSaved = 'Tare weight saved.';
+    } elseif ($action === 'save_ignore_unknown') {
+        // What the scan station does with a UPC that neither the lookup cache
+        // nor Open Food Facts can name. Off: it opens the "Identify this item"
+        // window and waits for a generic name. On: it says the item can be
+        // skipped and records nothing — what a pantry wants during a donation
+        // run of goods it will never order by UPC.
+        setSetting('ignore_unknown_items', isset($_POST['ignore_unknown_items']) ? '1' : '0');
+        $sysSaved = 'Unknown-item handling saved.';
     } else {
         // Free-text fields: stored as typed.
         foreach (['openai_api_key', 'openai_model'] as $k) {
@@ -289,7 +311,9 @@ $pantryName = setting('food_pantry_name', '') ?? '';
 $logoFile   = __DIR__ . '/../logo.jpg';
 $logoVer    = is_file($logoFile) ? ('?v=' . filemtime($logoFile)) : '';
 
-$allowedIp = setting('allowed_ip', '') ?? '';
+$allowedIp  = setting('allowed_ip', '') ?? '';
+$allowedIp2 = setting('allowed_ip2', '') ?? '';
+$allowedIp3 = setting('allowed_ip3', '') ?? '';
 $schedule  = fpAccessSchedule();
 $dayNames  = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 $nowDow    = (int)date('w');
@@ -304,6 +328,7 @@ $maxCr    = setting('max_storage_crates', '0');
 $lastErr  = setting('last_openai_error', '');
 $hasCurl  = function_exists('curl_init');
 $tareOz   = setting('tare_oz', '0');
+$ignoreUnknown = (setting('ignore_unknown_items', '0') ?? '0') === '1';
 
 $supervisorSet = fpSupervisorEnabled();
 
@@ -334,11 +359,12 @@ renderNav('settings');
     <div class="banner warn">
       <div style="font-size:1.2rem;">🔑</div>
       <div>
-        <strong>Supervisor sign-in — this page is read-only.</strong> You can
-        set the <strong>Public IPv4 Address</strong> under Secure Network
-        Access (the <em>Use My Current IP</em> and <em>Set IP Address</em>
-        buttons); every other setting here is shown for reference only. Sign in
-        with the administrator password to change them.
+        <strong>Supervisor sign-in — this page is nearly all read-only.</strong>
+        You can set the primary <strong>Public IPv4 Address</strong> under
+        Secure Network Access (the <em>Use My Current IP</em> and <em>Set IP
+        Address</em> buttons) and the <strong>Tare</strong>; every other
+        setting here is shown for reference only. Sign in with the
+        administrator password to change them.
       </div>
     </div>
   <?php endif; ?>
@@ -419,7 +445,7 @@ renderNav('settings');
       </div>
     <?php endif; ?>
 
-    <form method="post">
+    <form method="post" id="openaiForm">
       <div style="margin-bottom:12px;">
         <label for="key">OpenAI API Key</label>
         <input type="password" id="key" name="openai_api_key" value="<?= htmlspecialchars($key) ?>" placeholder="sk-...">
@@ -474,31 +500,154 @@ renderNav('settings');
     </form>
   </div>
 
+  <!-- ── Ignore Unknown Items ──────────────────────── -->
+  <div class="card">
+    <h2>Ignore Unknown Items</h2>
+    <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
+      Normally the station opens the <em>Identify this item</em> window and waits for
+      someone to type a generic name when a barcode can't be identified. Turn this on and it instead
+      records the item as <strong>“Unidentified”</strong> and moves on — no window, no beep, nothing to
+      type. Useful for donated goods the pantry never orders with an unknown barcode. Just put them
+      in the bag.
+    </p>
+    <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
+      The item still counts: it goes on the household's order and into the reports under the name
+      <strong>Unidentified</strong>, so the pantry can see how much of its volume is unlisted stock
+      instead of losing it. Turn this back off and the next scan of one of those barcodes opens the
+      <em>Identify this item</em> window, where the name you type replaces
+      <strong>Unidentified</strong> for that barcode <em>and</em> renames its own past scans. Other
+      unidentified barcodes are left alone.
+    </p>
+    <style>
+      /* Sliding switch. Still a plain checkbox underneath — it posts, it takes
+         focus and the space bar, and the supervisor read-only script disables
+         it — but stretched invisibly over the track so the whole switch is its
+         hit area, with the visible parts drawn by the two spans behind it. */
+      .switch-row { display: flex; align-items: center; gap: 12px; cursor: pointer;
+                    text-transform: none; font-size: .95rem; font-weight: 400;
+                    color: #333; margin-bottom: 16px; }
+      .switch { position: relative; flex: 0 0 auto; width: 52px; height: 28px; }
+      .switch input[type="checkbox"] { position: absolute; top: 0; left: 0;
+                    width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+      .switch-track { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+                    background: #fff; border: 2px solid var(--border); border-radius: 999px;
+                    pointer-events: none; transition: background .18s ease, border-color .18s ease; }
+      .switch-track::before { content: ""; position: absolute; top: 2px; left: 2px;
+                    width: 20px; height: 20px; border-radius: 50%; background: var(--border);
+                    transition: transform .18s ease, background .18s ease; }
+      .switch input[type="checkbox"]:checked + .switch-track { background: var(--green); border-color: var(--green); }
+      .switch input[type="checkbox"]:checked + .switch-track::before { background: #fff; transform: translateX(24px); }
+      .switch input[type="checkbox"]:focus-visible + .switch-track { outline: 2px solid var(--blue); outline-offset: 2px; }
+      .switch input[type="checkbox"]:disabled { cursor: not-allowed; }
+      .switch input[type="checkbox"]:disabled + .switch-track { opacity: .5; }
+      /* Respect a reduced-motion preference: the knob jumps instead of sliding. */
+      @media (prefers-reduced-motion: reduce) {
+        .switch-track, .switch-track::before { transition: none; }
+      }
+    </style>
+    <form method="post" id="ignoreUnknownForm">
+      <input type="hidden" name="fs_action" value="save_ignore_unknown">
+      <label class="switch-row" for="ignoreUnknownItems">
+        <span class="switch">
+          <input type="checkbox" name="ignore_unknown_items" value="1" id="ignoreUnknownItems"
+                 <?= $ignoreUnknown ? 'checked' : '' ?>>
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+        <span>Skip unidentified items instead of asking for a name</span>
+      </label>
+      <button type="submit" class="btn btn-primary" id="ignoreUnknownSave">Save Unknown-Item Handling</button>
+    </form>
+  </div>
+
+  <!-- ── Tare ──────────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Tare</h2>
+    <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
+      Container weight, in ounces, subtracted from the value entered in the
+      “Weight required” window when adding an item to an order. Set to 0 for
+      no tare. Weights the scale sends by itself are left alone — the scale is
+      zeroed on its own container, so subtracting this again would double-count
+      it.
+    </p>
+    <form method="post" id="tareForm">
+      <input type="hidden" name="fs_action" value="save_tare">
+      <div class="row" style="align-items:flex-end;">
+        <div>
+          <label for="tare_oz">Tare (ounces)</label>
+          <input type="number" id="tare_oz" name="tare_oz" min="0" step="0.01"
+                 value="<?= htmlspecialchars($tareOz) ?>">
+        </div>
+        <div style="flex:0 0 140px;">
+          <label>&nbsp;</label>
+          <button type="submit" class="btn btn-primary btn-block">Save Tare</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
   <!-- ── PantryPrep System Configuration ─────────────────────────
        (system save/error banner is rendered once at the top of the page) -->
 
   <div class="card">
     <h2>🌐 Secure Network Access</h2>
     <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
-      Restricts the PantryPrep order form and FoodScan scanning stations to a single
-      public IPv4 address (your pantry's WiFi). Leave blank to disable the check.
+      Restricts the PantryPrep order form and FoodScan scanning stations to up to
+      three public IPv4 addresses (your pantry's WiFi, plus any backup line or
+      second site). Leave them all blank to disable the check.
       Your current detected IP is <strong><?= htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '') ?></strong>.
     </p>
+    <?php $myIp = $_SERVER['REMOTE_ADDR'] ?? ''; ?>
+    <!-- The primary address lives in its own form because a supervisor may
+         change it; the two extras below are a separate, administrator-only
+         form (see the POST guard at the top of this file). -->
     <form method="post" id="ipForm">
       <input type="hidden" name="fs_action" value="save_ip">
       <label for="allowed_ip">Public IPv4 Address</label>
       <div class="row">
         <input type="text" id="allowed_ip" name="allowed_ip"
                value="<?= htmlspecialchars($allowedIp) ?>"
-               placeholder="<?= htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '') ?>"
+               placeholder="<?= htmlspecialchars($myIp) ?>"
                style="font-family:monospace;">
         <button type="submit" class="btn btn-primary">Set IP Address</button>
         <button type="button" class="btn btn-secondary"
-                onclick="document.getElementById('allowed_ip').value='<?= htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '') ?>'">
+                onclick="document.getElementById('allowed_ip').value='<?= htmlspecialchars($myIp) ?>'">
           Use My Current IP
         </button>
       </div>
     </form>
+
+    <form method="post" id="ipExtraForm" style="margin-top:18px;">
+      <input type="hidden" name="fs_action" value="save_ip_extra">
+      <?php
+      $ipExtras = [
+          ['allowed_ip2', 'Additional Public IPv4 Address (optional)', $allowedIp2],
+          ['allowed_ip3', 'Additional Public IPv4 Address (optional)', $allowedIp3],
+      ];
+      foreach ($ipExtras as $i => $f):
+          list($fId, $fLabel, $fVal) = $f;
+      ?>
+        <label for="<?= $fId ?>"<?= $i ? ' style="margin-top:12px;"' : '' ?>><?= htmlspecialchars($fLabel) ?></label>
+        <div class="row">
+          <input type="text" id="<?= $fId ?>" name="<?= $fId ?>"
+                 value="<?= htmlspecialchars($fVal) ?>"
+                 placeholder="<?= htmlspecialchars($myIp) ?>"
+                 style="font-family:monospace;">
+          <button type="button" class="btn btn-secondary" style="flex:0 0 170px;"
+                  onclick="document.getElementById('<?= $fId ?>').value='<?= htmlspecialchars($myIp) ?>'">
+            Use My Current IP
+          </button>
+        </div>
+      <?php endforeach; ?>
+      <div class="row" style="margin-top:14px;">
+        <button type="submit" class="btn btn-primary" style="flex:0 0 220px;">Set Additional Addresses</button>
+      </div>
+    </form>
+    <?php if ($isSupervisor): ?>
+      <p style="color:#777; font-size:.85rem; margin-top:10px;">
+        The two additional addresses are administrator-only. Sign in with the
+        administrator password to change them.
+      </p>
+    <?php endif; ?>
 
     <!-- ── Allowed Hours ──────────────────────────────────────────
          An optional time-of-day gate layered on top of the IP check.
@@ -605,7 +754,8 @@ renderNav('settings');
   <!-- ── Supervisor Password ───────────────────────────────────────
        A second shared password with the same reach as the administrator
        one, minus the ability to change anything on this page except the
-       Public IPv4 Address. Meant for the person who opens the pantry: they
+       primary Public IPv4 Address. Meant for the person who opens the pantry:
+       they
        can re-point Secure Network Access at today's WiFi address without
        being handed the keys to the OpenAI key, the email settings, or the
        passwords themselves. -->
@@ -616,7 +766,8 @@ renderNav('settings');
       administrator password opens — PantryPrep, FoodScan, Inventory, Delivery,
       the reports — but on this Settings page they can only use
       <strong>Use My Current IP</strong> and <strong>Set IP Address</strong>
-      under Secure Network Access. Everything else here is read-only for them.
+      under Secure Network Access — the two additional addresses below it are
+      administrator-only. Everything else here is read-only for them.
       Leave it unset to turn supervisor logins off entirely.
     </p>
     <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
@@ -905,30 +1056,20 @@ renderNav('settings');
     </div>
   </div>
 
-  <!-- ── Tare ──────────────────────────────────────────────────── -->
-  <div class="card">
-    <h2>Tare</h2>
-    <p style="color:#777; font-size:.85rem; margin-bottom:14px;">
-      Container weight, in ounces, subtracted from the value entered in the
-      “Weight required” window when adding an item to an order. Set to 0 for
-      no tare. Weights the scale sends by itself are left alone — the scale is
-      zeroed on its own container, so subtracting this again would double-count
-      it.
-    </p>
-    <form method="post">
-      <input type="hidden" name="fs_action" value="save_tare">
-      <div class="row" style="align-items:flex-end;">
-        <div>
-          <label for="tare_oz">Tare (ounces)</label>
-          <input type="number" id="tare_oz" name="tare_oz" min="0" step="0.01"
-                 value="<?= htmlspecialchars($tareOz) ?>">
-        </div>
-        <div style="flex:0 0 140px;">
-          <label>&nbsp;</label>
-          <button type="submit" class="btn btn-primary btn-block">Save Tare</button>
-        </div>
-      </div>
-    </form>
+  <!-- ── Consolidate Names ─────────────────────────────────────────
+       A bare button rather than a card: it opens a page of its own, so there
+       is nothing here to set. What the tool does lives in its tooltip and on
+       the page it opens. Administrator-only — a supervisor sees it disabled
+       so the tool stays discoverable from here. -->
+  <div style="margin-bottom:20px;">
+    <?php if ($isSupervisor): ?>
+      <button type="button" class="btn btn-secondary" disabled
+              title="Sign in with the administrator password to consolidate names">🔀 Consolidate Names</button>
+    <?php else: ?>
+      <a class="btn btn-secondary" href="../deduplicate/deduplicate.php"
+         style="text-decoration:none;"
+         title="Merge duplicate spellings of the same item, and clear out inventory rows nothing points at any more">🔀 Consolidate Names</a>
+    <?php endif; ?>
   </div>
 </div>
 <script>
@@ -1006,7 +1147,7 @@ document.getElementById('btnTest').addEventListener('click', async () => {
   const res = document.getElementById('testResult');
   res.textContent = 'Testing…'; res.style.color = '#777';
   // Save the form first so any pending key/model change is what we test.
-  const fd = new FormData(document.querySelector('form'));
+  const fd = new FormData(document.getElementById('openaiForm'));
   await fetch('', { method: 'POST', body: fd });
   const r = await fetch('../api_openai_test.php', { method: 'POST' }).then(r => r.json());
   if (r.ok) {
@@ -1017,16 +1158,46 @@ document.getElementById('btnTest').addEventListener('click', async () => {
     res.style.color = '#8B1A1A';
   }
 });
+
+<?php if (!$isSupervisor): ?>
+// Ignore Unknown Items is a single switch, and a switch reads as "takes effect
+// now" — flip it, see green, walk away. With a Save button next to it the card
+// would show the setting as on while the scan stations carried on asking for a
+// name. So the switch itself is the commit: changing it posts the form, and the
+// usual "saved" banner at the top of the page confirms it.
+//
+// The Save button stays in the markup and is only hidden here, so the card
+// still works if this script never runs. Skipped entirely for a supervisor
+// session, whose read-only view keeps the disabled switch and disabled button
+// like every other card on this page.
+(function () {
+  var form = document.getElementById('ignoreUnknownForm');
+  var box  = document.getElementById('ignoreUnknownItems');
+  var btn  = document.getElementById('ignoreUnknownSave');
+  if (!form || !box || !btn || box.disabled) return;
+  btn.style.display = 'none';
+  var sent = false;
+  box.addEventListener('change', function () {
+    // One navigation, not a stack of them, if the switch is flipped twice
+    // before the page reloads. The reload re-renders from the database, so
+    // whatever actually saved is what the switch shows afterwards.
+    if (sent) return;
+    sent = true;
+    form.submit();
+  });
+})();
+<?php endif; ?>
 </script>
 <?php if ($isSupervisor): ?>
 <script>
-// Supervisor session: the Public IPv4 Address form is the only editable thing
-// on this page. Disabling the rest is a courtesy so nobody types into a field
-// that won't save — settings.php refuses every action but save_ip regardless.
+// Supervisor session: the Public IPv4 Address and Tare forms are the only
+// editable things on this page. Disabling the rest is a courtesy so nobody
+// types into a field that won't save — settings.php refuses every action but
+// save_ip and save_tare regardless.
 (function () {
   var forms = document.querySelectorAll('form');
   for (var i = 0; i < forms.length; i++) {
-    if (forms[i].id === 'ipForm') continue;
+    if (forms[i].id === 'ipForm' || forms[i].id === 'tareForm') continue;
     var fields = forms[i].querySelectorAll('input, select, textarea, button');
     for (var j = 0; j < fields.length; j++) fields[j].disabled = true;
     forms[i].addEventListener('submit', function (e) { e.preventDefault(); });

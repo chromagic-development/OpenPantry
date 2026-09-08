@@ -10,8 +10,21 @@ requireAllowedIP();
 // order another station started (team scanning), in which case that shared
 // order is the one this page scans into.
 $myStation = currentStationId();
+// Sticky assist: a station left in assist mode joins the next open order by
+// itself. Runs before the order is resolved, so a reload between households
+// paints the new order rather than an idle bar it would have to poll out of.
+autoJoinNextAssist();
 $order     = activeScanOrder();
 $isAssist  = $order ? (bool)$order['is_assist'] : false;
+// On until Leave Assist, whether or not there is an order to help right now.
+$assistMode = assistModeOn();
+// In assist mode between orders: no order, but not free either — the bar shows
+// Leave Assist and the next scan joins the next order instead of starting one.
+$waiting    = !$order && $assistMode;
+// This station's own sliding switch: does it sound the scan tone when it
+// records an item while assisting? Per station and persistent (station_prefs),
+// so it is remembered the next time this device assists. Defaults to on.
+$scanBeepOn = stationScanBeep();
 // The scan table is rendered client-side, so a mid-order refresh would
 // otherwise show an empty list with no ✕ buttons — leaving the operator no way
 // to remove a mistake short of ending the order. Ship the open order's existing
@@ -22,9 +35,22 @@ $assistCount = $order ? orderAssistCount((int)$order['id']) : 0;
 // Orders on other stations this one could offer to help with. Only computed
 // when idle — a station already working an order isn't free to assist.
 $assistable  = $order ? [] : assistableOrders();
+// The scan page is gated by IP rather than by password, so most stations have
+// nobody signed in. When someone is — administrator or supervisor — the Assist
+// card also offers End and Cancel for each of those orders. That is the only
+// way to clear an order whose station has gone away (laptop closed, tablet
+// carried off): its owner is the only station allowed to close it, and the
+// owner is exactly what is missing, so it stays open forever, keeps showing up
+// as assistable, and keeps being re-joined by any station in sticky assist
+// mode. See 'remote_end' / 'remote_cancel' in api_order.php.
+$authRole       = fpAuthRole();
+$canRemoteClose = $authRole !== '';
 // Tare (ounces) subtracted from each entered produce weight; converted to lb
 // for the client-side weight math.
 $tareLbs = (float)(setting('tare_oz', '0') ?? 0) / 16.0;
+// Settings → Ignore Unknown Items. On, a packaged UPC that can't be named is
+// waved past instead of opening the "Identify this item" window.
+$ignoreUnknown = (setting('ignore_unknown_items', '0') ?? '0') === '1';
 // End/Cancel reload the page with these params so the confirmation survives
 // the refresh. Only honored when no order is open (a new scan supersedes it).
 $closedMsg = '';
@@ -45,7 +71,7 @@ renderHead('Scan');
   <div id="orderBar" class="card" style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
     <div style="flex:1 1 200px;">
       <div style="font-size:.75rem; text-transform:uppercase; color:#777;">
-        <span id="orderBarEyebrow"><?= $isAssist ? 'Assisting Order' : 'Current Order' ?></span>
+        <span id="orderBarEyebrow"><?= $isAssist ? 'Assisting Order' : ($waiting ? 'Assist Mode' : 'Current Order') ?></span>
         <!-- Owner-side team indicator. Hidden until a helper actually joins, so
              a single-station pantry never sees it. -->
         <span id="teamPill" class="team-pill"
@@ -53,13 +79,15 @@ renderHead('Scan');
           <span id="teamPillCount"><?= (int)$assistCount ?></span> assisting</span>
       </div>
       <div id="orderNumLabel" style="font-size:1.8rem; font-weight:800; color:var(--brown);">
-        <?= $order ? '#' . (int)$order['id'] : '— not started —' ?>
+        <?= $order ? '#' . (int)$order['id'] : ($waiting ? '— waiting —' : '— not started —') ?>
       </div>
       <div id="orderStartLabel" style="font-size:.8rem; color:#777;">
         <?php if ($order && $isAssist): ?>
           Started <?= htmlspecialchars($order['started_at']) ?> on another station
         <?php elseif ($order): ?>
           Started <?= htmlspecialchars($order['started_at']) ?>
+        <?php elseif ($waiting): ?>
+          Waiting for the next order to assist
         <?php else: ?>
           <?= $closedMsg ?: 'Scan an item to begin a new order' ?>
         <?php endif; ?>
@@ -67,11 +95,23 @@ renderHead('Scan');
     </div>
     <!-- Owner controls. A helper never gets these: ending or cancelling the
          shared order stays with the station that started it. -->
-    <div id="ownerControls" style="display:<?= $isAssist ? 'none' : 'flex' ?>; gap:8px;">
+    <div id="ownerControls" style="display:<?= ($isAssist || $waiting) ? 'none' : 'flex' ?>; gap:8px;">
       <button id="btnEnd"    class="btn btn-primary" <?= ($order && !$isAssist) ? '' : 'disabled' ?>>■ End Order</button>
       <button id="btnCancel" class="btn btn-danger"  <?= ($order && !$isAssist) ? '' : 'disabled' ?>>✕ Cancel Order</button>
     </div>
-    <div id="assistControls" style="display:<?= $isAssist ? 'flex' : 'none' ?>; gap:8px;">
+    <!-- Helper-side controls. The beep switch is here because the beep is
+         here: an assisting station confirms each item out loud on its own
+         speaker, and its operator is the one who decides whether they want
+         that. -->
+    <div id="assistControls" style="display:<?= ($isAssist || $waiting) ? 'flex' : 'none' ?>; gap:12px; align-items:center;">
+      <label class="switch-row" for="beepSwitch"
+             title="Sound a scan tone on this station each time you scan an item.">
+        <span class="switch">
+          <input type="checkbox" id="beepSwitch" <?= $scanBeepOn ? 'checked' : '' ?>>
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+        <span>🔔 Beep on each scan</span>
+      </label>
       <button id="btnLeaveAssist" class="btn btn-secondary">⎋ Leave Assist</button>
     </div>
   </div>
@@ -84,6 +124,14 @@ renderHead('Scan');
     <div style="font-size:.75rem; text-transform:uppercase; color:#777; margin-bottom:8px;">
       Another station is scanning
     </div>
+    <!-- Shown only to a signed-in administrator or supervisor, since only they
+         get the End / Cancel buttons on the rows below. -->
+    <div id="assistAdminNote" class="assist-note"
+         style="<?= $canRemoteClose ? '' : 'display:none;' ?>">
+      Signed in as <?= $authRole === 'supervisor' ? 'supervisor' : 'administrator' ?> —
+      you can close one of these orders from here if the station that started it
+      is no longer in use.
+    </div>
     <div id="assistList"><?php foreach ($assistable as $a): ?>
       <div class="assist-row">
         <div>
@@ -94,8 +142,20 @@ renderHead('Scan');
             <?= (int)$a['assist_count'] > 0 ? ' · ' . (int)$a['assist_count'] . ' assisting' : '' ?>
           </div>
         </div>
-        <button type="button" class="btn btn-secondary btn-assist"
-                data-order-id="<?= (int)$a['id'] ?>">+ Assist</button>
+        <div class="assist-actions">
+          <button type="button" class="btn btn-secondary btn-assist"
+                  data-order-id="<?= (int)$a['id'] ?>">+ Assist</button>
+          <?php if ($canRemoteClose): ?>
+          <button type="button" class="btn btn-primary btn-sm btn-remote-end"
+                  data-order-id="<?= (int)$a['id'] ?>"
+                  data-scan-count="<?= (int)$a['scan_count'] ?>"
+                  title="Close order #<?= (int)$a['id'] ?> from here and deduct its items from inventory.">■ End</button>
+          <button type="button" class="btn btn-danger btn-sm btn-remote-cancel"
+                  data-order-id="<?= (int)$a['id'] ?>"
+                  data-scan-count="<?= (int)$a['scan_count'] ?>"
+                  title="Discard order #<?= (int)$a['id'] ?> and everything scanned into it.">✕ Cancel</button>
+          <?php endif; ?>
+        </div>
       </div>
     <?php endforeach; ?></div>
   </div>
@@ -110,10 +170,19 @@ renderHead('Scan');
       <div><strong>Scanner ready</strong> — scan a barcode, or weigh produce
            first and scan its PLU when asked.</div>
     </div>
+
+    <!-- USB scale (HID POS). Hidden entirely on browsers without WebHID, so a
+         station using the keyboard-wedge cable never sees a control it can't
+         use. Shown by initScale() once support is confirmed. -->
+    <div id="scaleBar" class="scale-bar" style="display:none;">
+      <span id="scaleStatus" class="scale-status"></span>
+      <button id="scaleConnect" type="button" class="btn btn-secondary scale-btn">⚖ Connect Scale</button>
+    </div>
+
     <label for="barcodeInput">Barcode or Item Name</label>
     <input type="text" id="barcodeInput" autocomplete="off" autocapitalize="off"
            autocorrect="off" spellcheck="false"
-           placeholder="Scan, type a barcode, or type an item name…"
+           placeholder="Scan or type barcode/item name…"
            style="font-size:1.4rem; font-family:monospace; letter-spacing:2px;"
            autofocus>
 
@@ -167,31 +236,63 @@ renderHead('Scan');
   <div id="namePrompt" class="wt-overlay" style="display:none;" aria-hidden="true">
     <div class="wt-modal" role="dialog" aria-modal="true" aria-labelledby="nameTitle">
       <div class="wt-header">
-        <div class="wt-eyebrow">⚠ Unknown UPC</div>
+        <div id="nameEyebrow" class="wt-eyebrow">⚠ Unknown UPC</div>
         <h2 id="nameTitle" class="wt-title">Identify this item</h2>
         <div style="font-family:monospace; font-size:1rem; color:var(--brown); margin-top:6px;">
           <span id="nameUpc">—</span>
         </div>
       </div>
       <div class="wt-body">
-        <p style="font-size:.85rem; color:#777; margin-bottom:14px;">
+        <p id="nameStdNote" style="font-size:.85rem; color:#777; margin-bottom:14px;">
           Open Food Facts has no record of this UPC. Enter a generic name
           to add it to the cache so future scans recognize it automatically.
         </p>
+        <!-- Shown instead of the note above for a store-printed item label,
+             where what gets saved is deliberately not the barcode on the
+             package. Filled in by openNameModal(). -->
+        <p id="nameStoreNote" style="display:none; font-size:.85rem; color:#777; margin-bottom:14px;"></p>
         <div style="margin-bottom:14px;">
           <label for="nameBrand" class="wt-label">Branded Name <span style="font-weight:400; color:#999;">(optional)</span></label>
-          <input type="text" id="nameBrand" autocomplete="off"
+          <input type="text" id="nameBrand" autocomplete="off" autocapitalize="words"
                  placeholder="e.g. Bumble Bee Solid White Tuna">
         </div>
         <div>
           <label for="nameGeneric" class="wt-label">Generic Name</label>
-          <input type="text" id="nameGeneric" autocomplete="off"
+          <input type="text" id="nameGeneric" autocomplete="off" autocapitalize="words"
                  placeholder="e.g. Canned Tuna">
         </div>
       </div>
       <div class="wt-actions">
         <button id="nameCancel" type="button" class="btn btn-secondary wt-btn">Cancel</button>
         <button id="nameSubmit" type="button" class="btn btn-primary wt-btn wt-btn-primary">💾 Save &amp; Record</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Product-recall modal ──────────────────────────────────────────
+       A recalled item is the one case where the right outcome is for the
+       volunteer to stop, so this blocks rather than flashing a banner: a
+       4-second message at the top of the card is missed by an operator who is
+       looking at the cart, and the item would go home with the household. It
+       has to be dismissed, and it names the item so the right package comes
+       back out. -->
+  <div id="recallPrompt" class="wt-overlay recall-overlay" style="display:none;" aria-hidden="true">
+    <div class="wt-modal recall-modal" role="alertdialog" aria-modal="true" aria-labelledby="recallTitle">
+      <div class="wt-header recall-header">
+        <div class="wt-eyebrow">🚨 Recalled Product</div>
+        <h2 id="recallTitle" class="wt-title">Remove this item from the cart immediately - it has been recalled!</h2>
+      </div>
+      <div class="wt-body">
+        <div class="recall-item" id="recallItem">—</div>
+        <div class="recall-meta" id="recallMeta">—</div>
+        <p class="wt-hint">
+          Take this package out of the household's cart and set it aside for
+          disposal. It has <strong>not</strong> been added to the order, and it
+          cannot be scanned until the recall is cleared under Lookup Tables.
+        </p>
+      </div>
+      <div class="wt-actions">
+        <button id="recallAck" type="button" class="btn btn-danger wt-btn wt-btn-primary">✓ Item Removed</button>
       </div>
     </div>
   </div>
@@ -324,6 +425,25 @@ renderHead('Scan');
     .wt-btn { font-size: 1.05rem; padding: 14px 26px; min-width: 130px; }
     .wt-btn-primary { min-width: 180px; }
 
+    /* ── Recall window ── */
+    /* Above the PLU window's z-index: a held weight does not get to sit in
+       front of a recall, and acknowledging returns to the PLU window with the
+       weight still held. */
+    .recall-overlay { z-index: 10000; background: rgba(48, 4, 0, .86); }
+    .recall-modal { border: 3px solid var(--red); }
+    .recall-header { background: #F8D7DA; border-bottom: 1px solid #F1AEB5; }
+    .recall-header .wt-eyebrow, .recall-header .wt-title { color: #8B1A1A; }
+    .recall-header .wt-title { font-size: 1.6rem; }
+    /* Pulses so the window reads as an alarm from across the counter, where
+       the beep may be all the operator has noticed. */
+    .recall-modal { animation: wtPop .18s ease, recallPulse 1s ease-in-out infinite; }
+    @keyframes recallPulse {
+      0%, 100% { box-shadow: 0 20px 60px rgba(0,0,0,.35), 0 0 0 0 rgba(177,69,42,.55); }
+      50%      { box-shadow: 0 20px 60px rgba(0,0,0,.35), 0 0 0 14px rgba(177,69,42,0); }
+    }
+    .recall-item { font-size: 1.5rem; font-weight: 800; color: var(--brown); }
+    .recall-meta { font-family: monospace; font-size: .85rem; color: #777; margin-top: 4px; }
+
     /* ── Name type-ahead suggestion list ── */
     #nameMatches { border: 1px solid var(--border); border-radius: 10px;
                    margin-top: 8px; overflow: hidden; background: #fff; }
@@ -361,6 +481,20 @@ renderHead('Scan');
     /* ── Scan-table rows ── */
     /* Generic-name links open AI prep tips; dotted underline + help cursor
        so they read as "more info" rather than navigation. */
+    /* ── USB scale strip ── */
+    .scale-bar { display: flex; align-items: center; gap: 10px;
+                 margin: 10px 0 4px; flex-wrap: wrap; }
+    .scale-status { flex: 1 1 220px; font-size: .9rem; font-weight: 700;
+                    padding: 8px 12px; border-radius: 8px;
+                    border: 1px solid var(--border); background: var(--cat-bg);
+                    color: var(--brown); }
+    .scale-status.ok   { border-color: var(--green); }
+    /* The idle/fault state has to survive a glance from across the counter —
+       the operator is looking at the scale, not the screen. */
+    .scale-status.warn { border-color: var(--red); color: var(--red);
+                         background: #fdf3f3; }
+    .scale-btn { padding: 8px 14px; font-size: .9rem; }
+
     .prep-link { color: var(--brown); font-weight: 600;
                  text-decoration: underline dotted; text-underline-offset: 3px;
                  cursor: help; }
@@ -401,13 +535,48 @@ renderHead('Scan');
                  font-size: .68rem; font-weight: 800; letter-spacing: .3px;
                  text-transform: none; vertical-align: 1px; }
 
+    /* Sliding switch — same construction as the one on the Settings page: a
+       plain checkbox stretched invisibly over the track, so it keeps focus,
+       the space bar and the whole switch as its hit area, with the visible
+       parts drawn by the two spans behind it. Sized down a little: it shares
+       the order bar with the Leave Assist button. */
+    .switch-row { display: flex; align-items: center; gap: 8px; cursor: pointer;
+                  font-size: .82rem; font-weight: 600; color: #555;
+                  white-space: nowrap; }
+    .switch { position: relative; flex: 0 0 auto; width: 44px; height: 24px; }
+    .switch input[type="checkbox"] { position: absolute; top: 0; left: 0;
+                  width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+    .switch-track { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+                  background: #fff; border: 2px solid var(--border); border-radius: 999px;
+                  pointer-events: none; transition: background .18s ease, border-color .18s ease; }
+    .switch-track::before { content: ""; position: absolute; top: 2px; left: 2px;
+                  width: 16px; height: 16px; border-radius: 50%; background: var(--border);
+                  transition: transform .18s ease, background .18s ease; }
+    .switch input[type="checkbox"]:checked + .switch-track { background: var(--green); border-color: var(--green); }
+    .switch input[type="checkbox"]:checked + .switch-track::before { background: #fff; transform: translateX(20px); }
+    .switch input[type="checkbox"]:focus-visible + .switch-track { outline: 2px solid var(--blue); outline-offset: 2px; }
+    .switch input[type="checkbox"]:disabled { cursor: not-allowed; }
+    .switch input[type="checkbox"]:disabled + .switch-track { opacity: .5; }
+    /* Respect a reduced-motion preference: the knob jumps instead of sliding. */
+    @media (prefers-reduced-motion: reduce) {
+      .switch-track, .switch-track::before { transition: none; }
+    }
+
     .assist-row { display: flex; align-items: center; justify-content: space-between;
                   gap: 12px; flex-wrap: wrap; padding: 8px 0;
                   border-top: 1px solid #eee; }
     .assist-row:first-child { border-top: none; padding-top: 0; }
     .assist-order { font-size: 1.15rem; font-weight: 800; color: var(--brown); }
     .assist-meta  { font-size: .8rem; color: #777; }
-    .btn-assist:disabled { opacity: .5; cursor: not-allowed; }
+    .assist-note  { font-size: .8rem; color: #8a6d3b; background: #fcf8e3;
+                    border: 1px solid #f0e3b8; border-radius: 6px;
+                    padding: 6px 10px; margin-bottom: 10px; }
+    .assist-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    /* End / Cancel sit next to + Assist in a row that already carries the order
+       number and its counts, so they are sized down to keep the row on one
+       line — and to read as the secondary action they are. */
+    .btn-sm { padding: 8px 12px; font-size: .85rem; }
+    .btn-assist:disabled, .btn-sm:disabled { opacity: .5; cursor: not-allowed; }
 
     /* ── Two-column kiosk layout ──────────────────────────────────────────
        The scan station is data-dense and runs on a wide laptop screen, so it
@@ -508,6 +677,18 @@ const state = {
   // station's order), or 'idle'. Drives which controls the order bar shows.
   role: <?= json_encode($order ? ($isAssist ? 'assist' : 'owner') : 'idle') ?>,
   assistCount: <?= (int)$assistCount ?>,  // helper stations on this order
+  // Sticky assist: on until Leave Assist. While it is on and role is 'idle',
+  // this station is *between* orders — it joins the next one rather than
+  // starting an order of its own.
+  assistMode: <?= json_encode($assistMode) ?>,
+  // Administrator or supervisor signed in here? Only then does the Assist card
+  // draw End / Cancel for another station's order. The server checks the cookie
+  // again on the action itself — this only decides what is offered.
+  canClose: <?= json_encode($canRemoteClose) ?>,
+  // The beep switch in the assist controls: should this station sound the scan
+  // tone as it records items while assisting? Server-held per station, so it is
+  // the same switch the next time this device assists.
+  scanBeep: <?= json_encode($scanBeepOn) ?>,
   pendingProduce:    null,  // { barcode, generic_name } awaiting weight entry
   pendingUnknownUPC: null,  // { barcode } awaiting manual generic name
   weightDigits:      '',    // adding-machine buffer (manual lb+oz entry)
@@ -525,6 +706,19 @@ const state = {
 // Settings page in ounces.
 const TARE_LBS = <?= json_encode($tareLbs) ?>;
 
+// Settings → Ignore Unknown Items. When true, a packaged UPC that neither the
+// lookup cache nor Open Food Facts can name is recorded under the placeholder
+// name "Unidentified" instead of opening the name-entry window: the item is
+// counted, the barcode is cached against the placeholder, and the volunteer
+// bags it and moves on. lookupBarcode() does that work and answers ok=true with
+// unidentified=true, so the station only has to say what happened.
+//
+// The naming is not lost, only deferred: with the switch off, a scan of a UPC
+// still carrying the placeholder opens the Identify window (see openNameModal),
+// and the name typed there replaces it for that UPC and takes that UPC's scan
+// history with it.
+const IGNORE_UNKNOWN = <?= json_encode($ignoreUnknown) ?>;
+
 // Scans already recorded against the open order, so a page refresh restores the
 // list (and its ✕ buttons) instead of showing an empty table. Ascending id
 // order — appendRow prepends, so replaying them yields newest-on-top.
@@ -537,10 +731,29 @@ const MY_STATION = <?= json_encode($myStation) ?>;
 // Audible alerts for operator-action-required events, rendered with Web
 // Audio so no asset file is needed. Two distinct sounds so the operator can
 // tell them apart without looking at the screen:
-//   alertBeep() — rising two-tone chirp: produce weight entry.
-//   errorBeep() — harsh descending buzz: unknown UPC needing a manual name.
+//   alertBeep()  — rising two-tone chirp: produce weight entry.
+//   errorBeep()  — harsh descending buzz: unknown UPC needing a manual name.
+//   ignoreBeep() — rising swoop: unknown UPC skipped, nothing to do.
+//   alarmBeep()  — repeating two-tone siren: a recalled item was scanned.
 let audioCtx = null;
-function playTones(tones) {
+
+// Chrome will not let an AudioContext start until the page has seen a real
+// user gesture. A scan station that has only been *loaded* — auto-reconnected
+// to its scale, nobody having clicked anything yet — therefore drops its first
+// beeps silently, which is worst for the one alert that fires without anyone
+// touching the page: "make sure scale is on". Unlock on the first gesture of
+// any kind, including the barcode scanner's own keystrokes.
+function unlockAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { /* audio unavailable — fail silently */ }
+}
+['pointerdown', 'keydown', 'touchstart'].forEach((ev) =>
+  window.addEventListener(ev, unlockAudio, { once: true, capture: true }));
+
+function playTones(tones, level) {
+  const peak = level || 0.30;
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -552,8 +765,8 @@ function playTones(tones) {
       osc.frequency.value = freq;
       const start = t0 + offset;
       gain.gain.setValueAtTime(0, start);
-      gain.gain.linearRampToValueAtTime(0.30, start + 0.012);
-      gain.gain.setValueAtTime(0.30, start + dur - 0.02);
+      gain.gain.linearRampToValueAtTime(peak, start + 0.012);
+      gain.gain.setValueAtTime(peak, start + dur - 0.02);
       gain.gain.linearRampToValueAtTime(0, start + dur);
       osc.connect(gain); gain.connect(audioCtx.destination);
       osc.start(start); osc.stop(start + dur + 0.01);
@@ -566,10 +779,51 @@ function alertBeep() {
 function errorBeep() {
   playTones([[0, 330, 0.16, 'sawtooth'], [0.20, 220, 0.34, 'sawtooth']]);
 }
+// Falling pair — alertBeep() played backwards. Something came back off the
+// order, which is not an error (nothing went wrong, the operator asked for it)
+// and not a save, so it can't share a sound with either.
+function removeBeep() {
+  playTones([[0, 1175, 0.12], [0.14, 880, 0.18]]);
+}
+// Rising glide — the arcade "jump" swoop. Deliberately unlike errorBeep()'s
+// descending buzz: nothing went wrong and nothing is owed, the operator can
+// set the item aside and scan the next one. playTones() holds each note at a
+// fixed pitch, so this glide needs its own oscillator with a frequency ramp.
+function ignoreBeep() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t0  = audioCtx.currentTime;
+    const dur = 0.22;
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(330, t0);                        // ~E4
+    osc.frequency.exponentialRampToValueAtTime(1320, t0 + dur);   // ~E6, two octaves up
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(0.30, t0 + 0.012);
+    gain.gain.setValueAtTime(0.30, t0 + dur - 0.06);
+    gain.gain.linearRampToValueAtTime(0, t0 + dur);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(t0); osc.stop(t0 + dur + 0.01);
+  } catch (e) { /* audio unavailable — fail silently */ }
+}
 // Single crisp tone: the camera registered a barcode. A laser scanner beeps on
 // its own; the camera has no hardware feedback, so this stands in for it.
 function scanBeep() {
   playTones([[0, 1046, 0.12]]);   // ~C6
+}
+// Emergency two-tone siren: a recalled item is on the counter. Six alternating
+// notes over ~1.4s, far longer and more insistent than any other sound here, so
+// it can't be mistaken for the buzz that means "unknown UPC" — that one asks
+// for a name, this one means stop and take the package back. Louder too: the
+// operator may be several feet from the screen with the modal behind them.
+function alarmBeep() {
+  const tones = [];
+  for (let i = 0; i < 6; i++) {
+    tones.push([i * 0.24, i % 2 ? 660 : 990, 0.22]);   // E5 / B5, alternating
+  }
+  playTones(tones, 0.45);
 }
 
 const $ = (id) => document.getElementById(id);
@@ -578,7 +832,8 @@ const barcodeInput = $('barcodeInput');
 function modalOpen() {
   return $('weightPrompt').style.display !== 'none'
       || $('namePrompt').style.display   !== 'none'
-      || $('pluPrompt').style.display    !== 'none';
+      || $('pluPrompt').style.display    !== 'none'
+      || $('recallPrompt').style.display !== 'none';
 }
 function refocus() {
   // Never while the camera is running: on a phone, focusing a text input opens
@@ -597,6 +852,7 @@ document.addEventListener('focusin', (e) => {
             || e.target.closest('#weightPrompt')
             || e.target.closest('#namePrompt')
             || e.target.closest('#pluPrompt')
+            || e.target.closest('#recallPrompt')
             || e.target.closest('#orderBar')
             || e.target.closest('#assistCard')
             || e.target.tagName === 'A';
@@ -639,6 +895,12 @@ async function startOrderIfNeeded() {
   // Non-null while assisting too, so a helper's scans go to the shared order
   // instead of silently opening a competing one.
   if (state.orderId) return true;
+  // In assist mode between orders: this item belongs to the next order, not to
+  // one of this station's own. Join now — usually the poll has already done it
+  // and this never runs, but an operator can beat the 2.5s tick. The server
+  // refuses 'start' in this state anyway; this turns that refusal into the
+  // join the operator meant.
+  if (state.assistMode) return await joinNextOrderToAssist();
   const r = await postJson('../api_order.php', {action:'start'});
   if (!r.ok) { flash('Could not start order: ' + (r.error || 'unknown'), 'error'); return false; }
   state.orderId = r.order_id;
@@ -671,7 +933,7 @@ if (location.search) history.replaceState(null, '', location.pathname);
 
 // ── Camera scanning ────────────────────────────────────────────────────────
 // A phone pointed at a barcode, feeding the same handleScan() the laser
-// scanner feeds — so the 990001 end-order code, auto-start, the unknown-UPC
+// scanner feeds — so the 990001/990002/990003 command codes, auto-start, the unknown-UPC
 // prompt and the produce-weight flow all work identically from the camera.
 // Mainly for team scanning: a volunteer with a phone can assist an order
 // running on the wired station.
@@ -1053,10 +1315,28 @@ async function handleScaleWeight(raw) {
   }
   const lbs = parseScaleWeight(raw);
   if (lbs === null) return;
-  // The weight window is already open for a scanned item, but the keystrokes
-  // landed out here — the reading still belongs to that item. (Focus normally
-  // keeps this from happening; it costs one branch to not lose a weight if it
-  // does.)
+  if (lbs <= 0) {
+    flash('Scale sent ' + raw + ' — place the item on the platform and let the '
+        + 'reading settle.', 'error');
+    return;
+  }
+  await acceptScaleWeight(lbs, { echoCheck: true });
+}
+
+// Everything a captured weight goes through, whichever way it arrived: typed
+// by a keyboard-wedge cable, or decoded from a WebHID scale report. Keeping
+// this transport-agnostic is what lets a USB scale reuse the whole scale-first
+// flow — PLU window, mismatch handling, recording — without duplicating it.
+//
+// `echoCheck` guards the wedge path, where one settled reading is sometimes
+// transmitted twice. The HID path passes false: it already refuses to capture
+// again until the platform returns to zero, which is a stronger rule, and the
+// time-based echo window would wrongly swallow a second item that happens to
+// weigh the same.
+async function acceptScaleWeight(lbs, opts) {
+  const echoCheck = !opts || opts.echoCheck !== false;
+  // The weight window is already open for a scanned item — the reading belongs
+  // to that item, so fill it in rather than starting a second entry.
   if (state.pendingProduce && $('weightPrompt').style.display !== 'none') {
     state.weightDigits  = '';
     state.weightDecimal = String(lbs);
@@ -1064,15 +1344,16 @@ async function handleScaleWeight(raw) {
     await submitWeight();
     return;
   }
-  if (lbs <= 0) {
-    flash('Scale sent ' + raw + ' — place the item on the platform and let the '
-        + 'reading settle.', 'error');
-    return;
-  }
-  if (isScaleEcho(lbs)) {
+  if (echoCheck && isScaleEcho(lbs)) {
     state.lastScaleAt = Date.now();   // keep the echo window alive
     return;
   }
+  // A weight is already held, waiting for its PLU. Replacing it would beep for
+  // a second item, silently drop the first, and leave the operator typing a
+  // code against a number that had changed behind the window. The held entry
+  // has to be finished or discarded first — this is the last line of defence,
+  // and the scale path refuses earlier so it can explain itself on the strip.
+  if (state.pendingWeight !== null) return;
   // First item of a session can be a weighed one, so open the order here too.
   if (!(await startOrderIfNeeded())) return;
   state.pendingWeight = lbs;
@@ -1080,6 +1361,428 @@ async function handleScaleWeight(raw) {
   state.lastScaleAt   = Date.now();
   openPluModal(lbs);
 }
+
+// ── USB scale over WebHID (DYMO M25 and other HID POS scales) ─────────────
+// Postal/shipping scales that work with USPS postage software implement the
+// HID Point of Sale "Scale" usage page (0x8D). They are not keyboards and they
+// type nothing: they stream input reports carrying a status byte, a unit, a
+// power-of-ten exponent and a 16-bit raw weight. So there is no focus to
+// manage, no text to parse, no terminator to worry about, and the scale itself
+// reports when the reading has settled — no software settle detection needed.
+//
+// Because the report layout is a published standard rather than a vendor
+// format, any HID-compliant scale works with this code, not just the M25.
+const HID_SCALE_USAGE_PAGE = 0x8d;
+
+// HID POS scale status codes.
+const HID_ST_FAULT      = 1;
+const HID_ST_ZERO       = 2;   // stable at centre of zero — platform is clear
+const HID_ST_MOTION     = 3;
+const HID_ST_STABLE     = 4;   // settled with weight on the platform
+const HID_ST_UNDER_ZERO = 5;
+const HID_ST_OVER_LIMIT = 6;
+const HID_ST_NEEDS_CAL  = 7;
+const HID_ST_NEEDS_ZERO = 8;
+
+// HID POS weight-unit codes → multiplier into pounds. Whatever unit the
+// operator leaves the scale in, we store pounds — so unlike the wedge path
+// there is no "scale left in kilograms" failure to guard against.
+//
+// These codes are 1-based and easy to get wrong by one, which is not a
+// harmless slip: mistaking ounce (11) for troy ounce inflates every weight by
+// about 10% and nothing on screen looks broken. Anchor points from the DYMO
+// implementations — 0x02 is gram and 0x0B is ounce.
+// Deliberately partial: carats, taels and tons can't come off a pantry scale,
+// and an unmapped code raises a visible error rather than a silent wrong
+// number.
+const HID_UNIT_TO_LBS = {
+  1:  1 / 453592.37,    // milligram
+  2:  1 / 453.59237,    // gram
+  3:  2.20462262,       // kilogram
+  6:  1 / 7000,         // grain
+  10: 1 / 14.5833333,   // troy ounce
+  11: 1 / 16,           // ounce
+  12: 1,                // pound
+};
+
+// Below this the platform counts as empty: idle readings are ignored and the
+// scale is rearmed for the next item.
+const HID_MIN_CAPTURE_LBS = 0.02;
+
+// A single "stable" report is not enough to trust. Scales in this class raise
+// the stable flag while the reading is still creeping — produce settling in a
+// bag, a platform rebounding after an item lands, a shopper's hand still
+// resting on it — so capturing on the first stable report banks a weight that
+// is still moving. Instead the reading has to hold near where it started, for
+// a sustained window and across several reports, before it counts as final.
+//
+// There are two settle paths, because the evidence differs in strength:
+//
+//   • Every report reads *identically* — the value is parked, which is what a
+//     genuinely settled item looks like. Capture quickly.
+//   • The value jitters inside the tolerance — weaker evidence. Hold longer.
+//
+// A creeping weight changes on every report by definition, so it can never
+// qualify for the fast path. That is what lets this be responsive without
+// giving anything back on accuracy: speed is granted only to readings that
+// have actually stopped.
+//
+// Raise these if weights still land low; the cost is only a later beep.
+const HID_SETTLE_FAST_MS = 250;     // hold when consecutive reads are identical
+const HID_SETTLE_MS      = 700;     // hold when the value is still jittering
+// Minimum reports either path must see — and on a slow-reporting scale this,
+// not the timers above, is what you actually wait for. Measured on a DYMO M25:
+// it emits one report per second for a stationary item, so each report here
+// costs a full second. Two means the reading must hold unchanged across a
+// one-second gap before it counts, which is a real confirmation; three was two
+// seconds of it and felt broken. One would be no confirmation at all — that is
+// the setting that let a still-creeping weight get recorded.
+const HID_SETTLE_REPORTS = 2;
+// The jittery path needs one more, because its evidence is weaker: the value is
+// changing, just not by much. At 1 Hz two samples cannot tell a settled reading
+// from a slow creep — a weight climbing under the drift tolerance would sail
+// through on the second report. Three forces the creep to accumulate past the
+// tolerance and restart the window, which is what stops it.
+const HID_SETTLE_REPORTS_JITTER = 3;
+// Drift allowed from the anchor before the window restarts. At one division
+// (0.00625 lb on an M25) a reading flickering a division either side of centre
+// spans two divisions and restarts the window constantly, which is a stall
+// dressed up as caution. Two-and-a-bit divisions absorbs that flicker while
+// still catching creep: real creep runs far faster than 0.015 lb per window.
+const HID_SETTLE_TOL_LBS = 0.015;
+// Smallest change that counts as "the weight moved", for the idle watchdog.
+// Comfortably above the M25's 0.1 oz division so a jittering last digit does
+// not read as activity.
+const HID_CHANGE_LBS = 0.005;
+// The M25 powers itself down to save its batteries, and a scale that has shut
+// off looks exactly like one nobody has touched — both simply stop changing.
+// After three quiet minutes, say so out loud rather than letting a volunteer
+// set produce on a dead scale and wonder why nothing happens.
+const SCALE_IDLE_MS = 180000;
+// Separately: a scale that has produced no usable reading at all since the page
+// connected to it is almost always simply switched off. That deserves an answer
+// in seconds — nobody opening the page should sit through the three-minute idle
+// timeout to be told the scale isn't on.
+const SCALE_STARTUP_MS = 12000;
+
+const hid = {
+  device:       null,
+  lastLbs:      null,   // last reported weight, for change detection
+  lastChangeAt: 0,      // ms timestamp of the last change
+  idleWarned:   false,  // the "make sure scale is on" message is showing
+  armed:        true,   // false after a capture, until the platform clears
+  settleAnchor: null,   // weight the current settle window opened at
+  settleSince:  0,      // when it opened
+  settleCount:  0,      // stable reports seen inside it
+  settleLast:   null,   // previous reading, for spotting identical repeats
+  settleExact:  0,      // consecutive reports reading exactly the same
+  settleSign:   0,      // direction of the last change: +1, -1, or 0
+  settleMono:   0,      // consecutive changes in that same direction
+  connectedAt:  0,      // when this device was opened
+  everRead:     false,  // a usable weight has arrived since connecting
+  motionStreak: 0,      // consecutive non-stable reports
+};
+
+
+// Any reading that isn't stable-and-holding drops the settle window, so a
+// half-settled weight can never carry over into the next item's.
+function resetSettle() {
+  hid.settleAnchor = null;
+  hid.settleSince  = 0;
+  hid.settleCount  = 0;
+  hid.settleLast   = null;
+  hid.settleExact  = 0;
+  hid.settleSign   = 0;
+  hid.settleMono   = 0;
+}
+
+function scaleSupported() { return 'hid' in navigator; }
+
+function setScaleStatus(text, kind) {
+  const el = $('scaleStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'scale-status' + (kind ? ' ' + kind : '');
+}
+
+// Per-report status text. While "make sure scale is on" is showing, a sleeping
+// scale's own frames must not paint over it — that message is the answer to
+// what those frames mean, and it stays until a real weight change clears it.
+function setScaleStatusLive(text, kind) {
+  if (hid.idleWarned) return;
+  setScaleStatus(text, kind);
+}
+
+function parseHidScaleReport(data) {
+  // status, unit, exponent, weight LSB, weight MSB. The report ID is carried
+  // separately by the event, so byte 0 here is already the status.
+  if (!data || data.byteLength < 5) return null;
+  const status = data.getUint8(0);
+  const unit   = data.getUint8(1);
+  const exp    = data.getInt8(2);
+  const raw    = data.getUint16(3, true);
+  const factor = HID_UNIT_TO_LBS[unit];
+  // `raw` is carried through so the caller can tell an empty frame from a real
+  // measurement in a unit we don't map — they need very different answers.
+  if (factor === undefined) return { status: status, unit: unit, raw: raw, lbs: null };
+  return { status: status, unit: unit, raw: raw,
+           lbs: raw * Math.pow(10, exp) * factor };
+}
+
+// Only a *changed* weight proves someone is using the scale, and that is what
+// resets the idle countdown — a scale sitting untouched is about to sleep.
+//
+// A report we cannot turn into a weight is not activity. A scale that has
+// powered itself down keeps emitting empty frames, and counting those as use
+// would hold the countdown open forever, so the "make sure scale is on" message
+// could never appear — which is exactly the state it exists to report.
+function scaleHeartbeat(lbs) {
+  if (lbs === null) return;
+  hid.everRead = true;   // the scale is on and talking sense
+  const changed = (hid.lastLbs === null)
+               || Math.abs(lbs - hid.lastLbs) >= HID_CHANGE_LBS;
+  hid.lastLbs = lbs;
+  if (!changed) return;
+  hid.lastChangeAt = Date.now();
+  if (hid.idleWarned) {
+    hid.idleWarned = false;
+    setScaleStatus('⚖ Scale ready', 'ok');
+  }
+}
+
+async function onScaleReport(e) {
+  const r = parseHidScaleReport(e.data);
+  if (!r) return;
+  scaleHeartbeat(r.lbs);
+
+  // A scale that has powered itself down keeps the USB connection up and emits
+  // empty frames — status 0, unit 0, weight 0. Those are neither a fault nor a
+  // reading, so say nothing about them and let the idle watchdog be the thing
+  // that speaks. Reading them as a unit problem is what used to put "set it to
+  // lb or oz" on screen every time the scale went to sleep.
+  if (!r.status || r.status > HID_ST_NEEDS_ZERO) return;
+
+  if (r.status === HID_ST_OVER_LIMIT) {
+    setScaleStatusLive('⚠ Over capacity — take the item off the scale.', 'warn');
+    return;
+  }
+  if (r.status === HID_ST_FAULT || r.status === HID_ST_NEEDS_CAL) {
+    setScaleStatusLive('⚠ Scale fault — switch it off and on again.', 'warn');
+    return;
+  }
+  if (r.status === HID_ST_NEEDS_ZERO || r.status === HID_ST_UNDER_ZERO) {
+    setScaleStatusLive('⚠ Scale needs re-zeroing — clear the platform and press its Tare/Zero key.', 'warn');
+    return;
+  }
+  // An unconvertible reading of *zero* is an empty frame — a scale that is off
+  // or asleep, which reports a unit of 0 and no weight. There is no unit for
+  // the operator to change, so saying "set it to lb or oz" is both wrong and
+  // the only thing they'd see on a freshly opened page. Stay quiet and let the
+  // watchdog below report what is actually wrong: the scale isn't on.
+  //
+  // A non-zero value we cannot convert is a real measurement in a unit we
+  // don't map, and that IS worth saying — the operator can fix it on the
+  // scale's keypad.
+  if (r.lbs === null) {
+    if (r.raw > 0) {
+      setScaleStatusLive('⚠ Scale is reporting an unrecognized unit ('
+        + r.unit + ') — set it to lb or oz.', 'warn');
+    }
+    return;
+  }
+  // Platform clear → rearm for the next item. This is the HID equivalent of
+  // "clear the platform", and it is why the wedge path's timed echo window is
+  // not needed here.
+  if (r.status === HID_ST_ZERO || r.lbs < HID_MIN_CAPTURE_LBS) {
+    hid.armed = true;
+    hid.motionStreak = 0;
+    resetSettle();
+    setScaleStatusLive('⚖ Scale ready', 'ok');
+    return;
+  }
+  if (r.status !== HID_ST_STABLE) {
+    // One stray non-stable report in the middle of settling is normal — these
+    // scales flicker in and out of "stable" as an item beds in. Throwing the
+    // whole window away on a single blip is how a one-second settle turns into
+    // five: it restarts over and over and never finishes. Two in a row means
+    // the item really is moving.
+    hid.motionStreak++;
+    if (hid.motionStreak >= 2) {
+      resetSettle();
+      setScaleStatusLive('⚖ Weighing…', '');
+    }
+    return;
+  }
+  hid.motionStreak = 0;
+  if (!hid.armed) {
+    // A reading was already taken for whatever is sitting here — or refused,
+    // above. Once the pending entry is resolved, say what has to happen next
+    // instead of leaving a stale message on screen with the platform loaded.
+    if (state.pendingWeight === null) {
+      setScaleStatusLive('⚖ Clear the platform to weigh the next item.', '');
+    }
+    return;
+  }
+
+  // Stable — but hold it. Comparing against the anchor rather than the previous
+  // report is what stops a slow creep from settling: drifting a division per
+  // report keeps restarting the window instead of quietly accumulating.
+  if (hid.settleAnchor === null
+      || Math.abs(r.lbs - hid.settleAnchor) > HID_SETTLE_TOL_LBS) {
+    hid.settleAnchor = r.lbs;
+    hid.settleSince  = Date.now();
+    hid.settleCount  = 1;
+    hid.settleLast   = r.lbs;
+    hid.settleExact  = 1;
+    hid.settleSign   = 0;
+    hid.settleMono   = 0;
+    setScaleStatusLive('⚖ Settling…', '');
+    return;
+  }
+  hid.settleCount++;
+  // Same raw reading twice running means the value is parked, not drifting.
+  // (Identical raw counts decode to identical floats, so == is exact here.)
+  // Otherwise track which way it moved: a reading that keeps stepping the same
+  // direction is creeping, however small each step is, while a flickering last
+  // digit reverses. That direction — not the size of the step — is what tells
+  // the two apart when the scale only reports once a second and there are
+  // barely any samples to judge from.
+  if (r.lbs === hid.settleLast) {
+    hid.settleExact++;
+    hid.settleSign = 0;
+    hid.settleMono = 0;
+  } else {
+    const sign = r.lbs > hid.settleLast ? 1 : -1;
+    hid.settleExact = 1;
+    hid.settleMono  = (sign === hid.settleSign) ? hid.settleMono + 1 : 1;
+    hid.settleSign  = sign;
+  }
+  hid.settleLast  = r.lbs;
+
+  const held    = Date.now() - hid.settleSince;
+  const parked  = hid.settleExact >= HID_SETTLE_REPORTS
+               && held >= HID_SETTLE_FAST_MS;
+  // Two steps the same way is a trend, not noise — hold, whatever the timers say.
+  const trending = hid.settleMono >= 2;
+  const jittery = !trending
+               && hid.settleCount >= HID_SETTLE_REPORTS_JITTER
+               && held >= HID_SETTLE_MS;
+  if (!parked && !jittery) {
+    setScaleStatusLive('⚖ Settling…', '');
+    return;
+  }
+  // Refuse to start a second weighing while one is still waiting for its PLU.
+  // Removing the item and putting a new one on rearms the platform, so without
+  // this the station would happily beep for item after item, each one quietly
+  // replacing the weight the operator was in the middle of identifying.
+  //
+  // The reading is *discarded*, not queued, and the scale is disarmed with it:
+  // this item went on by mistake, and springing a second PLU window on the
+  // operator the instant they finish the first is how one mistake becomes two.
+  // Weighing it for real means taking it off and putting it back on.
+  if (state.pendingWeight !== null) {
+    hid.armed = false;
+    setScaleStatusLive('⚠ No PLU entered.', 'warn');
+    return;
+  }
+  hid.armed = false;
+  resetSettle();
+  setScaleStatus('⚖ Total weight at ' + r.lbs.toFixed(2) + ' lb.', 'ok');
+  await acceptScaleWeight(r.lbs, { echoCheck: false });
+}
+
+// Checked often enough to feel prompt, cheap enough to ignore.
+setInterval(() => {
+  if (!hid.device || hid.idleWarned) return;
+  // Nothing usable since we connected — the scale is switched off, not merely
+  // idle. Same thing to tell the operator, but answered in seconds: nobody
+  // opening this page should wait out the three-minute idle timeout to be told
+  // the scale isn't on.
+  if (!hid.everRead) {
+    if (Date.now() - hid.connectedAt < SCALE_STARTUP_MS) return;
+    hid.idleWarned = true;
+    errorBeep();
+    setScaleStatus('⚠ Make sure scale is on.', 'warn');
+    return;
+  }
+  if (!hid.lastChangeAt || Date.now() - hid.lastChangeAt < SCALE_IDLE_MS) return;
+  hid.idleWarned = true;
+  errorBeep();
+  setScaleStatus('⚠ Make sure scale is on.', 'warn');
+}, 5000);
+
+async function openScale(device) {
+  try {
+    if (!device.opened) await device.open();
+  } catch (err) {
+    setScaleStatus('⚠ Could not open the scale: ' + err.message, 'warn');
+    return false;
+  }
+  hid.device       = device;
+  hid.lastLbs      = null;
+  // Start the idle clock now, so a scale that is connected but already asleep
+  // still raises the message instead of waiting forever for a first report.
+  hid.lastChangeAt = Date.now();
+  hid.idleWarned   = false;
+  hid.armed        = true;
+  hid.connectedAt  = Date.now();
+  hid.everRead     = false;
+  resetSettle();
+  device.addEventListener('inputreport', onScaleReport);
+  // Not "ready" yet — nothing has been heard from it. Claiming ready before a
+  // single reading is what made a switched-off scale look fine on page load.
+  setScaleStatus('⚖ Scale connected — waiting for a reading…', '');
+  $('scaleConnect').style.display = 'none';
+  return true;
+}
+
+async function connectScale() {
+  let devices;
+  try {
+    devices = await navigator.hid.requestDevice({
+      filters: [{ usagePage: HID_SCALE_USAGE_PAGE }],
+    });
+  } catch (err) {
+    setScaleStatus('⚠ Scale not connected: ' + err.message, 'warn');
+    return;
+  }
+  if (!devices || !devices.length) return;   // operator dismissed the picker
+  await openScale(devices[0]);
+}
+
+function isScaleDevice(d) {
+  return d.collections
+      && d.collections.some(c => c.usagePage === HID_SCALE_USAGE_PAGE);
+}
+
+// A device the operator has already granted comes back through getDevices()
+// with no prompt, so the station reconnects silently on every later page load.
+// The Connect button is only ever needed once per browser profile.
+async function initScale() {
+  if (!scaleSupported()) return;   // keyboard-wedge stations never see the bar
+  $('scaleBar').style.display = 'flex';
+  setScaleStatus('⚖ Scale not connected', '');
+  $('scaleConnect').addEventListener('click', connectScale);
+
+  navigator.hid.addEventListener('disconnect', (e) => {
+    if (!hid.device || e.device !== hid.device) return;
+    hid.device = null;
+    hid.idleWarned = false;
+    setScaleStatus('⚠ Scale disconnected — check its USB cable and power.', 'warn');
+    $('scaleConnect').style.display = '';
+  });
+  navigator.hid.addEventListener('connect', async (e) => {
+    if (hid.device || !isScaleDevice(e.device)) return;
+    await openScale(e.device);
+  });
+
+  try {
+    const granted = await navigator.hid.getDevices();
+    const scale = granted.find(isScaleDevice);
+    if (scale) await openScale(scale);
+  } catch (err) { /* no grant yet — the Connect button covers it */ }
+}
+initScale();
 
 // Messages inside the PLU window. Every rejection buzzes: the operator is
 // looking at the scale and the item, not at the screen, so a silent red line
@@ -1321,11 +2024,40 @@ async function handleScan(code) {
     }
     return;
   }
+  // Reserved command barcode: 990002 is the "+ Assist" button in barcode form,
+  // so a helper station can join a teammate's order with the scanner alone.
+  // Must stay above startOrderIfNeeded() — a station about to assist is idle,
+  // and auto-starting an order of its own would block the join outright.
+  if (code === '990002') {
+    await joinNextOrderToAssist();
+    return;
+  }
+  // Reserved command barcode: 990003 is the ✕ on the newest row of This Order,
+  // in barcode form. A mis-scan is usually noticed with the next package
+  // already in hand, and reaching across the counter to tap a small button is
+  // the one thing in this flow that makes an operator put the scanner down.
+  // Above startOrderIfNeeded() like its siblings: undoing a scan must never be
+  // the thing that opens an order.
+  if (code === '990003') {
+    await removeNewestScan();
+    return;
+  }
   // First scan of a session auto-creates a new order; no Start button needed.
   if (!(await startOrderIfNeeded())) return;
   // Look up first so we know whether to ask for weight.
   const lk = await postJson('../api_scan.php', {action:'lookup', barcode: code});
   if (!lk.ok) {
+    // Recall first, ahead of every other not-found handling. The code resolved
+    // perfectly well — the refusal is deliberate — so none of the branches
+    // below apply: there is nothing to re-scan, nothing to name, and nothing
+    // to wave past, whichever station this is and whatever Ignore Unknown
+    // Items is set to. A held weight stays held: the PLU window is still
+    // behind this one, and the operator releases it with Discard Weight once
+    // the recalled package is out of the cart.
+    if (lk.recalled) {
+      openRecallModal(code, lk);
+      return;
+    }
     // With a weight held, keep the PLU window up and the weight with it — the
     // operator only mis-scanned, and re-weighing the item would be busywork.
     // flash('error') routes into that window while it is open.
@@ -1338,6 +2070,22 @@ async function handleScan(code) {
     // generic (and optional brand) so the scan can still be recorded and
     // future scans of this UPC hit the cache.
     if (lk.kind === 'packaged') {
+      // Settings → Ignore Unknown Items, fallback path. With the switch on
+      // the resolver normally answers ok=true and the item records under the
+      // placeholder, so getting here means the placeholder row itself couldn't
+      // be written — a locked database, a failed insert. Fall back to the old
+      // behaviour rather than stopping the line: banner, Unknown last-scan
+      // line, cleared field, no scan row — green and swooping up rather than
+      // red and buzzing down, because there is still nothing for the operator
+      // to fix. Checked ahead of the assist guard: with the item being skipped
+      // outright, "must be scanned by primary station" would send a helper on
+      // an errand that ends the same way at the other station.
+      if (IGNORE_UNKNOWN) {
+        flash('No scan required for this item.', 'error',
+              { beep: ignoreBeep, style: 'success' });
+        showLast('Unknown', code, '');
+        return;
+      }
       // Naming a UPC writes a pantry-wide lookup row, so it is the owner's
       // call, not a helper's. A helper gets the same treatment as a barcode
       // that doesn't parse: buzz, banner, and an Unknown last-scan line —
@@ -1347,7 +2095,7 @@ async function handleScan(code) {
         showLast('Unknown', code, '');
         return;
       }
-      openNameModal(code);
+      openNameModal(code, lk);
       return;
     }
     flash(lk.error || 'Unknown barcode: ' + code, 'error');
@@ -1405,6 +2153,16 @@ async function handleScan(code) {
   }
   const rec = await postJson('../api_scan.php', {action:'record', barcode: code});
   afterRecord(rec);
+  // Recorded, but under the placeholder name: Ignore Unknown Items is on and
+  // nothing could name this barcode. Say so plainly — the item IS on the order
+  // and IS counted, which is the whole difference from the old "no scan
+  // required" — and say it in green with no beep at all. Nothing is owed here:
+  // the volunteer bags it and scans the next one, and the naming happens later
+  // with the switch off.
+  if (rec.ok && rec.item && rec.item.unidentified) {
+    flash('Recorded as Unidentified — this barcode has no name yet.', 'info',
+          { style: 'success' });
+  }
 }
 
 // ── Weight entry: adding-machine (manual) OR decimal pounds (scale) ──────
@@ -1525,10 +2283,83 @@ $('weightInput').addEventListener('input', () => {
   renderWeight();
 });
 
+// ── Product-recall modal ────────────────────────────────────────────────
+// Raised whenever the resolver refuses a code because its upc_lookup row is
+// flagged recalled. Nothing was written — the server declined before the
+// insert — so there is no scan to undo here; the only outstanding action is
+// physical, and it belongs to the volunteer standing at the cart.
+function openRecallModal(code, lk) {
+  const name = (lk && lk.generic_name) || 'Recalled item';
+  const key  = (lk && lk.store_key) || null;
+  $('recallItem').textContent = name;
+  // The store key as well as the scanned label when they differ: the recall
+  // covers every package of that item, not just the one in hand.
+  $('recallMeta').textContent = key ? key + ' · scanned ' + code : code;
+  const m = $('recallPrompt');
+  m.style.display = 'flex';
+  m.setAttribute('aria-hidden', 'false');
+  alarmBeep();
+  // The last-scan line normally reads as a receipt for what went onto the
+  // order, so say plainly that this one did not.
+  showLast('⚠ RECALLED — ' + name, code, 'not recorded');
+  setTimeout(() => $('recallAck').focus(), 0);
+}
+function closeRecallModal() {
+  const m = $('recallPrompt');
+  m.style.display = 'none';
+  m.setAttribute('aria-hidden', 'true');
+}
+$('recallAck').addEventListener('click', () => {
+  closeRecallModal();
+  // Straight back to the field the scanner types into — unless the PLU window
+  // is still up behind this one, in which case refocus() leaves it alone and
+  // the held weight is still waiting there.
+  barcodeInput.value = '';
+  hideNameMatches();
+  if ($('pluPrompt').style.display !== 'none') { $('pluInput').focus(); return; }
+  refocus();
+});
+// Backdrop click does not dismiss: acknowledging a recall is deliberate.
+$('recallPrompt').addEventListener('click', (e) => {
+  if (e.target === $('recallPrompt')) { e.stopPropagation(); $('recallAck').focus(); }
+});
+
 // ── Unknown-UPC name-entry modal ────────────────────────────────────────
-function openNameModal(barcode) {
+function openNameModal(barcode, lk) {
   state.pendingUnknownUPC = { barcode };
-  $('nameUpc').textContent = barcode;
+  const storeKey = (lk && lk.store_key) || null;
+  // Scanned before while Ignore Unknown Items was on, so it is already on the
+  // shelf and already in the scan history under the placeholder name. The
+  // window is the same one — the operator's job is identical, type a generic
+  // name — but the eyebrow and the note say which situation this is, because
+  // the consequence differs: saving here also renames this barcode's past
+  // scans, and "Open Food Facts has no record of this UPC" would be a
+  // misleading thing to read while doing it.
+  const wasUnidentified = !!(lk && lk.unidentified);
+  $('nameEyebrow').textContent = wasUnidentified
+    ? '⚠ Unidentified Item'
+    : (storeKey ? '⚠ Unknown Store Label' : '⚠ Unknown UPC');
+  $('nameUpc').textContent = storeKey ? storeKey + ' · scanned ' + barcode : barcode;
+  $('nameStdNote').style.display = (storeKey && !wasUnidentified) ? 'none' : 'block';
+  $('nameStoreNote').style.display  = storeKey ? 'block' : 'none';
+  if (wasUnidentified) {
+    $('nameStdNote').textContent =
+      'This barcode was scanned before while Ignore Unknown Items was on, so '
+      + 'it was recorded as "Unidentified". Name it now and every past scan of '
+      + 'this one barcode is renamed with it — other unidentified items are '
+      + 'left alone.';
+  } else {
+    $('nameStdNote').textContent =
+      'Open Food Facts has no record of this UPC. Enter a generic name to add '
+      + 'it to the cache so future scans recognize it automatically.';
+  }
+  if (storeKey) {
+    $('nameStoreNote').textContent =
+      'This is a store-printed item label. The name is saved against '
+      + 'item ' + storeKey + ' only — the last five digits hold the price or '
+      + 'weight of this one package and change with every package, so one '
+      + 'name covers all of them.';
+  }
   $('nameBrand').value = '';
   $('nameGeneric').value = '';
   const m = $('namePrompt');
@@ -1554,6 +2385,35 @@ $('namePrompt').addEventListener('click', (e) => {
     $('nameGeneric').focus();
   }
 });
+// Capitalize the start of every word typed into the two name fields, so
+// "bumble bee tuna" is saved as "Bumble Bee Tuna" and matches the Title Case
+// the rest of the item names already use. generic_name is a case-sensitive key
+// (it is the inventory table's primary key), so a lower-case spelling typed at
+// the station would otherwise sit beside the capitalized one as a second item
+// with its own count and its own scan history.
+//
+// Only the FIRST letter of each word is touched; the rest is left exactly as
+// typed, so DEL MONTE, V8 and 2% survive being re-cased. A word starts at the
+// beginning of the field or after a space, hyphen, slash or opening bracket —
+// not after an apostrophe, which would give "Bob'S".
+function capitalizeWords(s) {
+  return s.replace(/(^[\s\-/([]*|[\s\-/([]+)(\S)/g, (m, sep, ch) => sep + ch.toUpperCase());
+}
+['nameBrand', 'nameGeneric'].forEach((id) => {
+  $(id).addEventListener('input', (e) => {
+    const el = e.target;
+    const next = capitalizeWords(el.value);
+    if (next === el.value) return;
+    // Re-casing a letter doesn't change the string's length, so the caret goes
+    // back exactly where it was instead of jumping to the end mid-word. The
+    // min() is only a guard for the rare character that lengthens when upper-
+    // cased.
+    const pos = Math.min(el.selectionStart, next.length);
+    el.value = next;
+    el.setSelectionRange(pos, pos);
+  });
+});
+
 // Enter never submits on either field, so a stray scanner burst (digits +
 // Enter) can't save a wrong generic name.
 ['nameBrand', 'nameGeneric'].forEach((id) => {
@@ -1571,9 +2431,9 @@ $('namePrompt').addEventListener('click', (e) => {
 });
 $('nameSubmit').addEventListener('click', async () => {
   if (!state.pendingUnknownUPC) return;
-  const generic = $('nameGeneric').value.trim();
+  const generic = capitalizeWords($('nameGeneric').value.trim());
   if (!generic) { $('nameGeneric').focus(); return; }
-  const brand = $('nameBrand').value.trim();
+  const brand = capitalizeWords($('nameBrand').value.trim());
   const rec = await postJson('../api_scan.php', {
     action: 'record',
     barcode: state.pendingUnknownUPC.barcode,
@@ -1673,7 +2533,24 @@ async function submitWeight() {
 }
 
 function afterRecord(rec) {
+  // The item was flagged recalled between this page's lookup and its record —
+  // an admin ticking the box mid-order, or a page open since before it was
+  // ticked. The server refused the insert either way; raise the same alarm the
+  // lookup path does rather than letting it read as an ordinary save failure.
+  if (!rec.ok && rec.recalled) {
+    openRecallModal(rec.barcode || '', rec);
+    return;
+  }
   if (!rec.ok) { flash(rec.error || 'Save failed', 'error'); return; }
+  // Assist stations confirm each item out loud. A helper is often the one on
+  // the far side of the cart with a phone, where the wired scanner's own beep
+  // isn't audible and the screen isn't being watched — this says the item
+  // landed on the shared order. Owner stations stay as they were: their
+  // hardware scanner already beeps for them.
+  //
+  // Not while the camera is running: it beeps on decode (onCamDecode), so
+  // beeping again on the record would double every item.
+  if (state.role === 'assist' && state.scanBeep && !state.scanner) scanBeep();
   const it = rec.item;
   showLast(it.generic_name, it.barcode,
     it.kind === 'produce' ? it.weight_lbs + ' lb' : 'qty ' + it.quantity);
@@ -1728,18 +2605,53 @@ function appendRow(it, timeLabel) {
 }
 
 async function removeScan(btn, scanId) {
-  if (!scanId) return;
+  if (!scanId) return false;
   btn.disabled = true;
   const r = await postJson('../api_scan.php', {action:'delete', scan_id: scanId});
   if (!r.ok) {
     btn.disabled = false;
     flash(r.error || 'Could not remove scan', 'error');
-    return;
+    return false;
   }
   const tr = btn.closest('tr');
   if (tr) tr.remove();
   recomputeOrderStats(r.scan_count);
   refocus();
+  return true;
+}
+
+// The scanner-only form of that ✕, reached by command barcode 990003. Rows are
+// prepended, so the first row in the table is the newest scan — the same row
+// the top ✕ sits on, and on a team-scanned order it may be a teammate's, just
+// as it is when the button is tapped. The server scopes either delete to the
+// open order.
+async function removeNewestScan() {
+  if (!state.orderId) { flash('No open order — nothing to remove.', 'info'); return; }
+  // A held weight is the outstanding action here, not a recorded scan: nothing
+  // has been written yet, so the thing to take back is the weight. Same release
+  // Discard Weight performs, and it leaves the previous item on the order,
+  // which is what the operator standing at the scale means by "undo".
+  if (state.pendingWeight !== null) {
+    clearPendingWeight();
+    flash('Weight discarded — clear the platform before weighing again.', 'info');
+    refocus();
+    return;
+  }
+  const row = $('scanTable').querySelector('tbody tr');
+  if (!row) { flash('Nothing scanned yet on this order.', 'info'); return; }
+  const scanId = Number(row.dataset.scanId || 0);
+  // A row with no id was never persisted, so there is nothing for the server to
+  // delete and the ✕ on it is dead too. Say so rather than failing silently.
+  if (!scanId) { flash('That row cannot be removed — reload the page.', 'error'); return; }
+  const name = row.children[1].textContent;
+  const btn  = row.querySelector('.btn-x');
+  if (!btn || !(await removeScan(btn, scanId))) return;
+  // The operator is looking at the cart, not the screen: say what left the
+  // order out loud, and correct the last-scan line, which still reads as a
+  // receipt for the item just removed.
+  removeBeep();
+  flash('Removed ' + name + ' from this order.', 'info');
+  showLast(name, row.children[6].textContent, 'removed');
 }
 
 // Recompute the visible "This Order" stats from whatever rows remain.
@@ -1774,7 +2686,12 @@ function bumpStats(it, scanCount) {
   $('statWeight').textContent = tableState.totalWeight.toFixed(1);
 }
 function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function flash(msg, kind) {
+// opts lets a caller keep the 'error' handling — the cleared barcode field and
+// the routing into the PLU window — while replacing the parts that say
+// something went wrong: opts.beep swaps the buzz, opts.style swaps the banner
+// color. For a message that is informational rather than a fault.
+function flash(msg, kind, opts) {
+  opts = opts || {};
   // With the PLU window up, a banner would render behind its dark overlay.
   // Errors go inside that window instead, where the operator is looking, and
   // the held weight survives so a mis-scan doesn't cost a re-weigh.
@@ -1789,12 +2706,12 @@ function flash(msg, kind) {
   // who misses the banner otherwise keeps scanning into the leftover text —
   // each burst appends to it, so every following scan is rejected too.
   if (kind === 'error') {
-    errorBeep();
+    (opts.beep || errorBeep)();
     barcodeInput.value = '';
     hideNameMatches();
   }
   const b = document.createElement('div');
-  b.className = 'banner ' + (kind || 'info');
+  b.className = 'banner ' + (opts.style || kind || 'info');
   b.textContent = msg;
   $('scanCard').prepend(b);
   setTimeout(() => b.remove(), 4000);
@@ -1816,15 +2733,21 @@ function applyRole(role, orderId, startedAt, assistCount) {
   state.assistCount = assistCount || 0;
   const owner  = role === 'owner';
   const assist = role === 'assist';
+  // Idle *and* in assist mode: between orders. Keeps Leave Assist (the only
+  // way out) and never offers End / Cancel, which would belong to an order
+  // this station doesn't have.
+  const waiting = !owner && !assist && state.assistMode;
 
-  $('orderBarEyebrow').textContent = assist ? 'Assisting Order' : 'Current Order';
-  $('ownerControls').style.display  = assist ? 'none' : 'flex';
-  $('assistControls').style.display = assist ? 'flex' : 'none';
+  $('orderBarEyebrow').textContent =
+    assist ? 'Assisting Order' : (waiting ? 'Assist Mode' : 'Current Order');
+  $('ownerControls').style.display  = (assist || waiting) ? 'none' : 'flex';
+  $('assistControls').style.display = (assist || waiting) ? 'flex' : 'none';
   $('btnEnd').disabled    = !owner;
   $('btnCancel').disabled = !owner;
   $('btnRecipe').disabled = !(owner || assist);
 
-  $('orderNumLabel').textContent = orderId ? '#' + orderId : '— not started —';
+  $('orderNumLabel').textContent =
+    orderId ? '#' + orderId : (waiting ? '— waiting —' : '— not started —');
   if (orderId) {
     $('orderStartLabel').textContent =
       'Started ' + startedAt + (assist ? ' on another station' : '');
@@ -1855,6 +2778,7 @@ function redrawScans(scans, scanCount) {
 function renderAssistable(list) {
   const card = $('assistCard');
   if (!list || !list.length) { card.style.display = 'none'; return; }
+  $('assistAdminNote').style.display = state.canClose ? '' : 'none';
   $('assistList').innerHTML = list.map(a => `
     <div class="assist-row">
       <div>
@@ -1863,8 +2787,16 @@ function renderAssistable(list) {
           · ${a.scan_count} item${a.scan_count === 1 ? '' : 's'}${
             a.assist_count > 0 ? ' · ' + a.assist_count + ' assisting' : ''}</div>
       </div>
-      <button type="button" class="btn btn-secondary btn-assist"
-              data-order-id="${a.id}">+ Assist</button>
+      <div class="assist-actions">
+        <button type="button" class="btn btn-secondary btn-assist"
+                data-order-id="${a.id}">+ Assist</button>${state.canClose ? `
+        <button type="button" class="btn btn-primary btn-sm btn-remote-end"
+                data-order-id="${a.id}" data-scan-count="${a.scan_count}"
+                title="Close order #${a.id} from here and deduct its items from inventory.">■ End</button>
+        <button type="button" class="btn btn-danger btn-sm btn-remote-cancel"
+                data-order-id="${a.id}" data-scan-count="${a.scan_count}"
+                title="Discard order #${a.id} and everything scanned into it.">✕ Cancel</button>` : ''}
+      </div>
     </div>`).join('');
   card.style.display = '';
 }
@@ -1872,15 +2804,33 @@ function renderAssistable(list) {
 // Apply a sync/assist_join/assist_leave payload to the whole page.
 function applySync(d) {
   lastFingerprint = d.fingerprint;
+  // The server is the authority on the mode, and applyRole() reads it, so it
+  // has to land before anything repaints.
+  state.assistMode = !!d.assist_mode;
+  // Signing in (or out) in another tab changes what the card may offer, and the
+  // idle fingerprint carries the flag so a poll actually reaches this line.
+  if (typeof d.can_close === 'boolean') state.canClose = d.can_close;
+  // Same for the switch: a reload, or the page in another tab, finds it where
+  // the operator left it rather than where this copy of the page last drew it.
+  if (typeof d.scan_beep === 'boolean') {
+    state.scanBeep = d.scan_beep;
+    $('beepSwitch').checked = d.scan_beep;
+  }
   if (d.role === 'idle') {
     // Falling out of an order we were assisting means the owner ended or
-    // cancelled it — say so, since nothing on this station caused it.
+    // cancelled it — say so, since nothing on this station caused it. In assist
+    // mode the station isn't done, only between households: the server joins
+    // the next order on a later poll (or the next scan does it).
     if (state.role === 'assist' && state.orderId) {
-      flash('Order #' + state.orderId + ' was closed by the other station', 'info');
+      flash(state.assistMode
+        ? 'Order #' + state.orderId + ' closed — waiting for the next order to assist'
+        : 'Order #' + state.orderId + ' was closed by the other station', 'info');
     }
     state.orderId = null;
     applyRole('idle', null, null, 0);
-    $('orderStartLabel').textContent = 'Scan an item to begin a new order';
+    $('orderStartLabel').textContent = state.assistMode
+      ? 'Waiting for the next order to assist'
+      : 'Scan an item to begin a new order';
     resetTable();
     renderAssistable(d.assistable);
     return;
@@ -1909,8 +2859,45 @@ async function syncTick() {
 }
 setInterval(syncTick, SYNC_MS);
 
+// Close an order this station doesn't own — the escape hatch for an order
+// whose station has gone away. Confirmed rather than immediate: this reaches
+// across the room into someone else's order, and Cancel throws away scans that
+// are not this station's to throw away.
+async function remoteClose(btn, cancel) {
+  const id    = Number(btn.dataset.orderId);
+  const items = Number(btn.dataset.scanCount || 0);
+  const what  = items + ' item' + (items === 1 ? '' : 's');
+  const msg = cancel
+    ? 'Cancel order #' + id + ' on the other station? The ' + what
+      + ' scanned into it will be discarded, and this cannot be undone.'
+    : 'End order #' + id + ' on the other station? Its ' + what
+      + ' will be deducted from inventory, exactly as if that station had'
+      + ' pressed End Order itself.';
+  if (!window.confirm(msg)) { refocus(); return; }
+  btn.disabled = true;
+  const r = await postJson('../api_order.php',
+    {action: cancel ? 'remote_cancel' : 'remote_end', order_id: id});
+  if (!r.ok) {
+    btn.disabled = false;
+    // Usually the owner came back and closed it during the 2.5s the card was
+    // stale. Clear the fingerprint so the next tick redraws from fresh state.
+    lastFingerprint = null;
+    flash(r.error || 'Could not close that order', 'error');
+    return;
+  }
+  applySync(r);
+  flash(cancel
+    ? 'Order #' + id + ' cancelled — its scans were discarded'
+    : 'Order #' + id + ' ended — its items were deducted from inventory', 'info');
+  refocus();
+}
+
 // Delegated so it survives renderAssistable() replacing the list.
 $('assistCard').addEventListener('click', async (e) => {
+  const endBtn = e.target.closest('.btn-remote-end');
+  if (endBtn) return await remoteClose(endBtn, false);
+  const cancelBtn = e.target.closest('.btn-remote-cancel');
+  if (cancelBtn) return await remoteClose(cancelBtn, true);
   const btn = e.target.closest('.btn-assist');
   if (!btn) return;
   btn.disabled = true;
@@ -1928,6 +2915,50 @@ $('assistCard').addEventListener('click', async (e) => {
   refocus();
 });
 
+// Join an order with the server picking which (see api_order.php
+// 'assist_auto'), and report what it decided — the operator is looking at the
+// scanner, not the Assist card. Used by command barcode 990002 and, in assist
+// mode, by the first scan of the next order. Returns whether this station came
+// out of it attached to an order.
+async function joinNextOrderToAssist() {
+  const r = await postJson('../api_order.php', {action: 'assist_auto'});
+  if (!r.ok) {
+    // Either several orders were open, or the one candidate closed between the
+    // last poll and the scan. Clear the fingerprint so the next tick redraws
+    // the card from fresh state either way.
+    lastFingerprint = null;
+    flash(r.error || 'Could not join an order', 'error');
+    return false;
+  }
+  applySync(r);
+  // The same rising chirp that asks for a weight: nothing is wrong, but the
+  // order bar just changed under the operator and is worth a glance.
+  alertBeep();
+  flash((r.already ? 'Already assisting order #' : 'Now assisting order #') + r.order.id, 'info');
+  refocus();
+  return true;
+}
+
+// The beep switch. Saved per station, so it outlives this order, this assist
+// and this browser session. The checkbox is already in its new position when
+// this fires, so a refused save has to put it back — a switch that lies about
+// what the station will do is worse than no switch.
+$('beepSwitch').addEventListener('change', async (e) => {
+  const on = e.target.checked;
+  const r = await postJson('../api_order.php', {action:'scan_beep', on: on});
+  if (!r || !r.ok) {
+    e.target.checked = !on;
+    flash('Could not save the beep setting', 'error');
+    return;
+  }
+  state.scanBeep = on;
+  flash(on ? 'This station will beep on each item you scan'
+           : 'This station will stay quiet as you scan', 'info');
+  refocus();
+});
+
+// The one way out of assist mode: it ends both the current assist (if any) and
+// the standing offer to pick up the next order.
 $('btnLeaveAssist').addEventListener('click', async () => {
   const r = await postJson('../api_order.php', {action:'assist_leave'});
   if (!r.ok) { flash(r.error || 'Could not leave assist', 'error'); return; }

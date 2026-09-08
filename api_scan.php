@@ -2,8 +2,10 @@
 // Record a single scan, look up a barcode, or remove a scan from the open order.
 // POST { action: 'lookup', barcode }                          -> resolve only, do not insert.
 // POST { action: 'record', barcode, weight_lbs?, quantity? }  -> resolve + insert; returns the new scan_id.
+//        A store-printed item label (prefix 2) records as one package, like any other packaged item.
 // POST { action: 'delete', scan_id }                          -> remove a scan, only if it belongs to the current open order.
-// POST { action: 'search', q, scope? }                        -> partial name match against the lookup tables.
+// POST { action: 'search', q, scope? }                        -> partial name match against the lookup tables,
+//        best matches first: exact name, then names starting with the query, then word-boundary hits.
 //        scope='weighed' restricts to produce codes sold by the pound.
 
 require_once __DIR__ . '/common.php';
@@ -47,21 +49,51 @@ if ($action === 'search') {
         );
         $st->execute([$like, $like, $like]);
     }
+    // Rank tier for the type-ahead: a short, common query like "chicken" turns
+    // up dozens of names that merely contain it, and a plain alphabetical cut
+    // to eight ("Bouillon Powder" … "Canned Dog Food") drops the item actually
+    // named Chicken off the bottom. Score first, slice after.
+    $ql = mb_strtolower($q);
+    $qLen = strlen($ql);
     $matches = [];
     foreach ($st->fetchAll() as $row) {
         $key = mb_strtolower($row['generic_name']);
         if (isset($matches[$key])) continue;  // produce rows come first, so they win
+        if ($key === $ql) {
+            $rank = 0;                                    // "Chicken"
+        } elseif (strncmp($key, $ql, $qLen) === 0) {
+            $rank = 1;                                    // "Chicken Noodle Soup"
+        } elseif (preg_match('/\b' . preg_quote($ql, '/') . '/u', $key)) {
+            $rank = 2;                                    // "Canned Chicken", "Butter Chicken"
+        } elseif (mb_strpos($key, $ql) !== false) {
+            $rank = 3;                                    // mid-word hit
+        } else {
+            $rank = 4;                                    // matched on brand name only
+        }
         $matches[$key] = [
             'code'  => $row['code'],
             'name'  => $row['generic_name'],
             'brand' => $row['brand_name'],
             'src'   => $row['src'],
+            'rank'  => $rank,
+            'key'   => $key,
         ];
     }
-    ksort($matches);
+    // Best tier first, alphabetical inside a tier. The key is compared
+    // explicitly rather than leaning on sort stability, which the host's PHP
+    // is too old to guarantee.
+    usort($matches, function ($a, $b) {
+        if ($a['rank'] !== $b['rank']) return $a['rank'] - $b['rank'];
+        return strcmp($a['key'], $b['key']);
+    });
+    $top = [];
+    foreach (array_slice($matches, 0, 8) as $m) {
+        unset($m['rank'], $m['key']);   // ranking is internal; the page reads name/brand/code
+        $top[] = $m;
+    }
     jsonOut([
         'ok'      => true,
-        'matches' => array_slice(array_values($matches), 0, 8),
+        'matches' => $top,
         'total'   => count($matches),
     ]);
 }
@@ -96,14 +128,63 @@ if ($barcode === '') jsonOut(['ok' => false, 'error' => 'Missing barcode'], 400)
 // OFF and the operator filled in the "Unknown UPC" modal with a generic
 // name, write the mapping to upc_lookup BEFORE resolving so the resolver
 // hits the cache instead of re-running OFF + OpenAI.
+//
+// Two shapes arrive here. A UPC nobody has ever named is inserted. A UPC the
+// station recorded under the placeholder while Ignore Unknown Items was on is
+// overwritten instead, and its scans come with it -- see below.
 $manualGeneric = trim((string)($in['generic_name'] ?? ''));
 if ($action === 'record' && $manualGeneric !== '' && classifyBarcode($barcode) === 'packaged') {
     $manualBrand = trim((string)($in['brand_name'] ?? ''));
-    getDB()->prepare(
-        "INSERT INTO upc_lookup (upc, brand_name, generic_name, source, created_at)
-         VALUES (?, ?, ?, 'manual', ?)
-         ON CONFLICT(upc) DO NOTHING"
-    )->execute([$barcode, $manualBrand, $manualGeneric, now()]);
+    // A store-printed item label is cached under its six-digit item
+    // key, never the whole label: the trailing digits are this one package's
+    // price, so keying the name to them would name a single package and leave
+    // the next one unknown.
+    $cacheKey = lookupCacheKey($barcode);
+    $db = getDB();
+
+    $cur = $db->prepare('SELECT generic_name FROM upc_lookup WHERE upc = ?');
+    $cur->execute([$cacheKey]);
+    $prev = $cur->fetchColumn();
+
+    if ($prev === UNIDENTIFIED_NAME) {
+        // The placeholder is the one existing name the station is allowed to
+        // overwrite. It was never a decision -- only a marker left where a
+        // decision hadn't been made yet -- whereas any other name in this
+        // column WAS one, and changing that belongs on the Lookup Tables page,
+        // not on a counter mid-order. The WHERE clause repeats the check so a
+        // teammate who named the same UPC a second earlier still wins.
+        $db->prepare(
+            "UPDATE upc_lookup
+                SET generic_name = ?, brand_name = ?, source = 'manual', updated_at = ?
+              WHERE upc = ? AND generic_name = ?"
+        )->execute([$manualGeneric, $manualBrand, now(), $cacheKey, UNIDENTIFIED_NAME]);
+
+        // Carry this UPC's own history onto the name it just got, so the demand
+        // the pantry already recorded lands on the real item instead of being
+        // stranded under the placeholder. Scoped to the barcode, never to the
+        // name: every other UPC still waiting to be named is sitting under the
+        // same placeholder, and a rename by name would sweep all of them onto
+        // whatever was typed here. That is also why the Consolidate Names tool
+        // cannot do this job -- it merges by name and nothing else.
+        //
+        // Bounded work: one indexed UPDATE over the scan rows of a single item.
+        renameUPCScans($cacheKey, $manualGeneric, UNIDENTIFIED_NAME);
+
+        // The `Unidentified` inventory row is deliberately left alone. Its
+        // count is a hand-entered figure standing for a shelf of mixed unnamed
+        // goods, and no share of it can honestly be attributed to this one UPC.
+        // It empties out on the Inventory page as the names get assigned.
+    } elseif ($prev === false) {
+        $db->prepare(
+            "INSERT INTO upc_lookup (upc, brand_name, generic_name, source, created_at)
+             VALUES (?, ?, ?, 'manual', ?)
+             ON CONFLICT(upc) DO NOTHING"
+        )->execute([$cacheKey, $manualBrand, $manualGeneric, now()]);
+    }
+    // It has a name now, so it is no longer an unidentified UPC. Matters when
+    // Ignore Unknown Items gets switched back on later: without this the stale
+    // miss would keep the station skipping an item it can actually name.
+    forgetUnidentifiedUPC($cacheKey);
 }
 
 $res = lookupBarcode($barcode);
@@ -162,5 +243,11 @@ jsonOut([
         'station_label' => orderStations((int)$open['id'])[$station] ?? '',
         'brand_name' => $res['brand_name'] ?? null,
         'source' => $res['source'] ?? null,
+        // Present only for a store-printed label: the six-digit item key the
+        // name is cached under, so the station can say what it actually saved.
+        'store_key' => $res['store_key'] ?? null,
+        // True when this recorded under the placeholder name because Ignore
+        // Unknown Items is on, so the station can say so in the banner.
+        'unidentified' => !empty($res['unidentified']),
     ],
 ]);

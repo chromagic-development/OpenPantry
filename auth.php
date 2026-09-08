@@ -5,9 +5,10 @@
 //                        openpantry.db's settings table (via setting() in
 //                        db.php). Cookie name and token format match
 //                        PantryPrep so a single login works across both apps.
-//   requireAllowedIP() — 403s if REMOTE_ADDR doesn't match `allowed_ip`
-//                        in the same settings store. Empty value = no
-//                        restriction (lets you set it up first).
+//   requireAllowedIP() — 403s unless REMOTE_ADDR matches one of the three
+//                        allowed addresses (`allowed_ip`, `allowed_ip2`,
+//                        `allowed_ip3`) in the same settings store. All
+//                        blank = no restriction (lets you set it up first).
 //
 // Two passwords open the same doors. `admin_password` is the administrator
 // login. `supervisor_password` (optional, Settings -> "Supervisor Password")
@@ -239,9 +240,27 @@ function fpRenderAccessDenied(string $reason): void {
     exit;
 }
 
+// Every public IPv4 address the pantry may be reached from: the primary one
+// plus the two optional extras (Settings -> Secure Network Access). Blank
+// entries drop out, so a set that is entirely blank means "no gate".
+function fpAllowedIPs(): array {
+    $ips = [];
+    foreach (['allowed_ip', 'allowed_ip2', 'allowed_ip3'] as $key) {
+        $ip = trim((string)(setting($key, '') ?? ''));
+        if ($ip !== '') $ips[] = $ip;
+    }
+    return $ips;
+}
+
+// True when the visitor's address passes the network gate — either because no
+// address has been set at all, or because theirs is one of the ones that were.
+function fpRemoteIPAllowed(): bool {
+    $allowed = fpAllowedIPs();
+    return $allowed === [] || in_array($_SERVER['REMOTE_ADDR'] ?? '', $allowed, true);
+}
+
 function requireAllowedIP(): void {
-    $allowed = trim(setting('allowed_ip', '') ?? '');
-    $ipOk    = ($allowed === '') || (($_SERVER['REMOTE_ADDR'] ?? '') === $allowed);
+    $ipOk    = fpRemoteIPAllowed();
     $timeOk  = fpAccessTimeAllowed();
     if ($ipOk && $timeOk) return;
     // Network mismatch is the more fundamental block, so report it first.
@@ -254,8 +273,7 @@ function requireAllowedIP(): void {
 }
 
 function requireAllowedIPAPI(): void {
-    $allowed = trim(setting('allowed_ip', '') ?? '');
-    $ipOk    = ($allowed === '') || (($_SERVER['REMOTE_ADDR'] ?? '') === $allowed);
+    $ipOk    = fpRemoteIPAllowed();
     $timeOk  = fpAccessTimeAllowed();
     if ($ipOk && $timeOk) return;
     http_response_code(403);

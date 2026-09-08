@@ -3,13 +3,13 @@ require_once '../db.php';
 require_once '../../auth.php'; // fpRenderAccessDenied() — shared styled Access Denied wall
 $db = getDB();
 
-$allowedIp = foodscanSetting('allowed_ip', '') ?: $_SERVER['REMOTE_ADDR'];
+$allowedIps = foodscanAllowedIPs();
 
 $visitor_ip = $_SERVER['REMOTE_ADDR'];
 
 // Render the same styled "🔒 Access Denied" wall the delivery and scan kiosks
 // show, mirroring auth.php's requireAllowedIP() reasons (network first).
-if ($visitor_ip !== $allowedIp) {
+if ($allowedIps && !in_array($visitor_ip, $allowedIps, true)) {
     // This appears if the device is NOT on the WiFi
     fpRenderAccessDenied('');
 }

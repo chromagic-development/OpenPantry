@@ -6,6 +6,7 @@ $GLOBALS['FS_PREFIX'] = '../../';
 require_once __DIR__ . '/../../common.php';
 require_once __DIR__ . '/../../auth.php';
 require_once __DIR__ . '/../../event/event_types.php';
+require_once __DIR__ . '/../../lookup.php';   // storeLabelSql()
 requireLogin();
 $db = getDB();
 
@@ -70,7 +71,14 @@ $orderTypeCase .= " WHEN o.note LIKE 'EVENT %' THEN 'Event' ELSE 'Pantry' END";
 // exists in produce_lookup. Weighed produce (kind='produce') is always in there
 // too, but we keep the OR so a deleted lookup row can't demote it to packaged.
 // The measurement unit (lb vs each) still keys on `kind` throughout.
-$categorySql = "CASE WHEN pl.code IS NOT NULL OR s.kind = 'produce' THEN 'produce' ELSE 'packaged' END";
+// Store-printed item labels are tested first and always land in
+// packaged. They record that way now, but rows written while the station read
+// the label's embedded weight carry kind='produce' — that field is the
+// measurement unit, not the aisle — and without this clause a pound of sliced
+// turkey would still report as produce.
+$categorySql = "CASE WHEN " . storeLabelSql('s.barcode') . " THEN 'packaged'
+                     WHEN pl.code IS NOT NULL OR s.kind = 'produce' THEN 'produce'
+                     ELSE 'packaged' END";
 
 $conditions = ["s.scanned_at >= :rs", "s.scanned_at <= :re"];
 $params     = [':rs' => $rangeStart, ':re' => $rangeEnd];

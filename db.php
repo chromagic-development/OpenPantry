@@ -51,6 +51,7 @@ function getDB(): PDO {
     migrateAddOrderStation($db);
     migrateAddScanStation($db);
     migrateAddAlertEmailEnabled($db);
+    migrateAddUpcRecalled($db);
     // Convert a stored plaintext (or previously-encrypted) admin_password into
     // a one-way hash. Runs before the field-encryption migration so the latter
     // never re-encrypts the password.
@@ -276,6 +277,17 @@ function migrateAddAlertEmailEnabled(PDO $db): void {
     $db->exec("ALTER TABLE alerts ADD COLUMN email_enabled INTEGER NOT NULL DEFAULT 0");
 }
 
+// Adds upc_lookup.recalled (default 0) on installs created before product
+// recalls could be flagged. Every existing mapping stays scannable; an admin
+// ticks the Recalled box on the Lookup Tables page to pull one.
+function migrateAddUpcRecalled(PDO $db): void {
+    $cols = $db->query("PRAGMA table_info(upc_lookup)")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($cols as $c) {
+        if (($c['name'] ?? '') === 'recalled') return;
+    }
+    $db->exec("ALTER TABLE upc_lookup ADD COLUMN recalled INTEGER NOT NULL DEFAULT 0");
+}
+
 function seedProduce(PDO $db): void {
     // Standard 4-digit PLU codes for conventionally-grown common produce.
     // Add 12-digit "starts with 4" entries via the admin page if your pantry
@@ -320,7 +332,9 @@ function seedSettings(PDO $db): void {
         // then shows the cu ft total without comparing it to anything.
         'max_storage_crates' => '0',
         'admin_password'   => 'admin',  // shared login (FoodScan + PantryPrep)
-        'allowed_ip'       => '',       // single allowed IPv4; empty = no gate
+        'allowed_ip'       => '',       // primary allowed IPv4; all three empty = no gate
+        'allowed_ip2'      => '',       // optional second allowed IPv4
+        'allowed_ip3'      => '',       // optional third allowed IPv4
         'admin_email'      => '',       // where reorder-reminder emails are sent
         // Outbound email (reorder reminders). Empty smtp_host = use PHP mail().
         'smtp_host'        => '',
@@ -409,3 +423,60 @@ function setSetting(string $key, string $value): void {
 }
 
 function now(): string { return date('Y-m-d H:i:s'); }
+
+// ── The placeholder name ───────────────────────────────────────────
+// What a packaged UPC is called while Settings -> Ignore Unknown Items is on
+// and nothing — cache, store-label rules, Open Food Facts — can name it.
+//
+// The switch used to mean "wave the item past and record nothing", which kept
+// the counter moving but spent the pantry's own data to do it: a case of
+// donated goods crossed the scanner and left no trace, so it counted toward no
+// household's order and no report. lookup.php records the item under this name
+// instead and caches the UPC against it, so the volume is captured now and the
+// naming can happen later.
+//
+// It is an ordinary upc_lookup row, not a flag, which is what lets most of the
+// app carry on unchanged: it appears on the Inventory page and in the usage and
+// impact reports, and every UPC still waiting for a name shares the one row.
+// Two places do have to know it by name:
+//
+//   * lookupBarcode() refuses to answer with it once the switch is off — the
+//     station opens the Identify window instead, and the name typed there
+//     replaces the placeholder for that one UPC, taking that UPC's scan history
+//     with it (renameUPCScans).
+//   * op_report_rows() drops it, which also silences any reorder alert on it.
+//     "Order 4 cases of Unidentified" is not an instruction anyone can act on:
+//     the row is an unknowable mix of items, so its demand history models
+//     nothing and its par level buys nothing. It stays visible where it is
+//     honest — how much unlisted stock moved — and out of what the pantry buys.
+//
+// Defined here rather than in lookup.php because the report code needs it and
+// has no reason to load the OFF/OpenAI resolver.
+const UNIDENTIFIED_NAME = 'Unidentified';
+
+// ── Unidentified-UPC cache (legacy, drain-only) ────────────────────
+// Companion to upc_lookup holding UPCs Open Food Facts has no product for, so
+// a pantry running with Ignore Unknown Items on doesn't re-ask OFF about the
+// same case every time it crosses the scanner.
+//
+// Superseded: those UPCs now get a real upc_lookup row under the
+// 'Unidentified' placeholder (lookup.php's nameUPCUnidentified), which answers
+// the next scan from the cache read that already runs first AND lets the item
+// be recorded instead of dropped. So nothing writes this table any more, and
+// the function that did is gone; upcIsUnidentified() is still read so rows the
+// older build left behind convert to placeholders on their next scan, and
+// forgetUnidentifiedUPC() clears each one as it does. They live here rather
+// than in lookup.php because the admin pages that name a UPC by hand have no
+// reason to pull in the OFF/OpenAI code.
+
+function upcIsUnidentified(string $upc): bool {
+    $stmt = getDB()->prepare('SELECT 1 FROM upc_unidentified WHERE upc = ?');
+    $stmt->execute([$upc]);
+    return (bool)$stmt->fetchColumn();
+}
+
+// Called wherever a upc_lookup row is created, regardless of the switch: this
+// is cleanup, not a lookup, and a named UPC is no longer an unidentified one.
+function forgetUnidentifiedUPC(string $upc): void {
+    getDB()->prepare('DELETE FROM upc_unidentified WHERE upc = ?')->execute([$upc]);
+}

@@ -56,6 +56,29 @@ CREATE TABLE IF NOT EXISTS order_assists (
 -- Looked up by station on every scan (activeScanOrder), so index that side.
 CREATE INDEX IF NOT EXISTS idx_order_assists_station ON order_assists(station);
 
+-- Sticky assist mode. A station that joins an order stays in assist mode until
+-- Leave Assist is pressed: when the order it is helping ends or is cancelled,
+-- its order_assists row goes away but this one doesn't, and the station joins
+-- the next order by itself (autoJoinNextAssist()). One row per station, present
+-- only while the mode is on.
+CREATE TABLE IF NOT EXISTS assist_mode (
+    station  TEXT PRIMARY KEY,      -- fs_station token of the helping device
+    since    TEXT NOT NULL          -- when the mode was switched on
+);
+
+-- Per-device preferences that outlive any one order or assist session, so a
+-- station finds its own switches where it left them. A missing row means every
+-- default, which is why nothing is written until a switch is actually moved.
+--
+-- scan_beep: whether this station sounds the scan tone on its own speaker as
+-- it records items while assisting. Set from the sliding switch in the assist
+-- controls, and read only by the station that owns it.
+CREATE TABLE IF NOT EXISTS station_prefs (
+    station    TEXT PRIMARY KEY,          -- fs_station token of the device
+    scan_beep  INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+
 -- Days the pantry operated but nothing was scanned (volunteer absent, station
 -- down, simply forgotten). These days are *unobserved*, not zero-demand: food
 -- left the building with no record of it.
@@ -84,10 +107,50 @@ CREATE TABLE IF NOT EXISTS unscanned_days (
 CREATE TABLE IF NOT EXISTS upc_lookup (
     upc           TEXT PRIMARY KEY,
     brand_name    TEXT,           -- raw name from OFF (for review)
+    -- 'Unidentified' is a reserved placeholder, written by the station while
+    -- Settings -> Ignore Unknown Items is on and nothing can name the barcode.
+    -- It is a real name in every other respect (it counts, it appears on the
+    -- Inventory page), but lookupBarcode() refuses to answer with it once that
+    -- switch is off: the station opens the Identify window instead, and the
+    -- name typed there overwrites it for that UPC and renames that UPC's own
+    -- scan rows. See UNIDENTIFIED_NAME in lookup.php.
     generic_name  TEXT NOT NULL,
-    source        TEXT NOT NULL,  -- 'off+ai' | 'manual' | 'off-only'
+    -- 'unidentified' is the placeholder above, and the one value a station is
+    -- allowed to overwrite in place.
+    source        TEXT NOT NULL,  -- 'off+ai' | 'manual' | 'off-only' | 'unidentified'
     created_at    TEXT NOT NULL,
-    updated_at    TEXT
+    updated_at    TEXT,
+    -- Product recall. Ticked from the Recalled column on the Lookup Tables
+    -- page when a supplier or the FDA pulls an item. lookupBarcode() then
+    -- refuses the code outright — ok=false with recalled=1 — so api_scan.php
+    -- writes no scans row and the station sounds an alarm and tells the
+    -- volunteer to pull the item back out of the cart. Enforced in the
+    -- resolver rather than in the scan page so a station left open since
+    -- before the box was ticked still can't record the item, and so both
+    -- spellings of a store-printed label are refused by the one check.
+    --
+    -- Only barcode-resolved channels see this: delivery / event / orderahead
+    -- pick items by generic name off the inventory menu and never touch a UPC,
+    -- so a recall on one brand of an item can't speak for the rest of it.
+    recalled      INTEGER NOT NULL DEFAULT 0
+);
+
+-- Legacy companion to upc_lookup: UPCs that Open Food Facts has no product
+-- for. Written by an older build, in which Ignore Unknown Items waved an
+-- unidentifiable UPC past and recorded nothing at all — so remembering the
+-- miss was the only way to spare the next package of the same case another
+-- six-second OFF request.
+--
+-- Nothing writes it any more. Those UPCs now get a real upc_lookup row under
+-- the 'Unidentified' placeholder, which remembers the miss and records the
+-- item, and which the always-first upc_lookup read answers from directly. The
+-- table is still consulted so the rows already in it convert on their next
+-- scan: a hit promotes the UPC to a placeholder row and deletes itself, so
+-- this drains to empty as the pantry's unknown stock comes back across the
+-- scanner.
+CREATE TABLE IF NOT EXISTS upc_unidentified (
+    upc         TEXT PRIMARY KEY,
+    checked_at  TEXT NOT NULL   -- when OFF last answered "no such product"
 );
 
 -- Produce: PLU code (or pantry-printed 12-digit label starting with 4) -> name.

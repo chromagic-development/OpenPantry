@@ -114,6 +114,11 @@ if ($authSeed !== null) {
     setAuthCookie($authSeed, $twoMonths);
 }
 
+// Which password holds this session. A supervisor keeps every control on this
+// page, but the Remap Names tool linked at the foot of it opens read-only for
+// them -- see foodscanIsSupervisor() in ../db.php.
+$isSupervisor = foodscanIsSupervisor();
+
 // Show login wall if not authenticated
 if (!isAuthenticated()) {
     // Rendering the wall is the one moment a soft-locked IP may trigger the
@@ -336,9 +341,17 @@ if (!isAuthenticated()) {
     </table>
     </div>
     <div class="btn-row">
-      <div style="display:flex;gap:10px;">
+      <div style="display:flex;gap:10px;align-items:center;">
         <button class="btn btn-green" onclick="addRow()">+ Add Item</button>
         <button class="btn btn-brown" onclick="saveItems()">💾 Save All Changes</button>
+        <a class="btn btn-brown" href="../deduplicate/deduplicate.php"
+           style="display:inline-flex; align-items:center; text-decoration:none;"
+           title="<?= $isSupervisor
+                     ? 'Opens read-only — sign in with the administrator password to apply a remap'
+                     : 'Merge duplicate or renamed spellings of the same item on past order rows' ?>">🔀 Remap Names</a>
+        <?php if ($isSupervisor): ?>
+          <span style="font-size:.78rem;color:#999;">read-only</span>
+        <?php endif; ?>
       </div>
       <span style="font-size:.78rem;color:#999;">Changes are saved to the database immediately</span>
     </div>

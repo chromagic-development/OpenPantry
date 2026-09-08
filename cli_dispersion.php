@@ -61,6 +61,10 @@ foreach ($stmt as $r) {
     $amt = ($r['kind'] === 'produce') ? (float)$r['wt'] : (float)$r['qty'];
     $hist[$r['generic_name']][$r['day']] = $amt;
 }
+// Dropped by op_report_rows() too, so this diagnostic keeps reporting on
+// exactly the series the report fits. The placeholder's history is an
+// unknowable mix of items, so its dispersion describes nothing.
+unset($hist[UNIDENTIFIED_NAME], $kinds[UNIDENTIFIED_NAME]);
 
 // Mirror of op_glm_fit_series()'s early-outs, so a null fit can be attributed
 // to a specific gate instead of just "no fit". Pure diagnosis — it computes the

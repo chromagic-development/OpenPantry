@@ -26,6 +26,7 @@ $GLOBALS['FS_PREFIX'] = '../../';
 require_once __DIR__ . '/../../common.php';
 require_once __DIR__ . '/../../auth.php';
 require_once __DIR__ . '/../../event/event_types.php';
+require_once __DIR__ . '/../../lookup.php';      // storeLabelSql()
 require_once __DIR__ . '/../../delivery/db.php'; // picklistDB(): the shared picklist.db handle
 requireLogin();
 $db = getDB();
@@ -102,11 +103,160 @@ $channelColor = [
     'OrderAhead' => '#C7902B',
 ];
 
+// ── Fresh / frozen protein items ──────────────────────────────────────────
+// The pantry hands out meat and fish that is scanned by the piece but is
+// nowhere near the ~1 lb an average packaged item weighs, so rolling it into
+// the generic "counted items" bucket understates the year badly. An item is
+// treated as fresh/frozen protein when all three hold:
+//
+//   1. its generic name names a meat or a fish — by the animal (turkey, lamb),
+//      the cut (ham, bacon) or the species (haddock, pollack), since a bag of
+//      Haddock says nothing about "fish" and a Ham says nothing about "pork",
+//   2. it carries an Avg Wt (inventory.lb_per_each) — without a real per-piece
+//      weight there is nothing to convert with, and
+//   3. its name does not contain "can" — canned chicken, canned tuna and
+//      chicken-noodle soup are shelf-stable groceries, not fresh protein.
+//
+// Matching rows are weighed at their own Avg Wt instead of $lbPerItem and are
+// carried as a third category everywhere pounds are split, so no pound is
+// counted twice. On the chart they collapse to the meat itself: "Pork Loin
+// Fillet" and "Pork Chops" are both simply Pork, Ham and Bacon are Pork too,
+// and every fish species is simply Fish.
+
+// Keyword => chart label, in priority order: the FIRST hit wins, so Turkey
+// Bacon is Turkey rather than Pork and a Beef Hot Dog is Beef rather than a
+// Hot Dog. Matched on whole words (with an optional plural) so a short keyword
+// cannot fire inside an unrelated grocery — the ham pattern leaves Hamburger
+// Buns and Graham Crackers alone, and veal does not match "reveal".
+$proteinMap = [
+    'chicken'     => 'Chicken',
+    'cornish hen' => 'Chicken',
+    'turkey'      => 'Turkey',
+    'beef'        => 'Beef',
+    'veal'        => 'Veal',
+    'pork'        => 'Pork',
+    'ham'         => 'Pork',
+    'bacon'       => 'Pork',
+    'lamb'        => 'Lamb',
+    'mutton'      => 'Lamb',
+    'duck'        => 'Duck',
+    'goose'       => 'Goose',
+    'quail'       => 'Quail',
+    'rabbit'      => 'Rabbit',
+    'venison'     => 'Venison',
+    'elk'         => 'Elk',
+    'bison'       => 'Bison',
+];
+// Fish species, all labelled Fish. Same whole-word rule, and for the same
+// reason: "cod", "sole", "hake", "bass" and "perch" are short enough to turn
+// up inside other words, and a Protein Shake is not hake. Species ending in
+// -fish are caught by the loose 'fish' test below as well, but are listed here
+// so the rule reads as one list. Goat and buffalo are deliberately absent:
+// Goat Cheese is dairy and Buffalo Sauce is a condiment.
+$fishSpecies = [
+    'pollack', 'pollock', 'catfish', 'cod', 'haddock', 'hake', 'whiting',
+    'tilapia', 'swai', 'basa', 'salmon', 'tuna', 'halibut', 'trout',
+    'flounder', 'sole', 'mackerel', 'sardine', 'anchovy', 'anchovies',
+    'herring', 'smelt', 'perch', 'bass', 'snapper', 'grouper', 'mahi',
+    'walleye', 'tilefish', 'swordfish', 'monkfish',
+];
+
+// Compiled once rather than per inventory row. The optional plural lets "Cod"
+// and "Cods" both land without letting the stem run on into another word.
+$proteinRe = [];
+foreach ($proteinMap as $w => $l) {
+    $proteinRe[] = ['/\\b' . preg_quote($w, '/') . '(?:e?s)?\\b/', $l];
+}
+$fishRe = '/\\b(?:' . implode('|', $fishSpecies) . ')(?:e?s)?\\b/';
+
+// Every item the Inventory page has weighed. An Avg Wt is a measured fact
+// about the item, so wherever one exists it wins over the $lbPerItem guess
+// — for meat, for produce and for packaged goods alike. $lbPerItem survives
+// only as the fallback for items with no weight on record.
+$lbEach = [];
+foreach ($db->query("SELECT generic_name, lb_per_each FROM inventory WHERE lb_per_each > 0") as $r) {
+    $lbEach[(string)$r['generic_name']] = (float)$r['lb_per_each'];
+}
+
+$proteinLbEach = [];   // generic_name => avg lb per piece
+$proteinGroup  = [];   // generic_name => 'Chicken' | 'Turkey' | 'Fish' | ...
+foreach ($lbEach as $name => $lbPerEach) {
+    $low  = mb_strtolower($name);
+    if (strpos($low, 'can') !== false) continue;          // canned / cannellini: not fresh
+    // Label by the meat, not the recipe.
+    $label = null;
+    foreach ($proteinRe as $t) {
+        if (preg_match($t[0], $low)) { $label = $t[1]; break; }
+    }
+    // 'fish' stays a loose substring test so unlisted -fish species (bluefish,
+    // rockfish) still land, which a whole-word test would miss.
+    if ($label === null && (strpos($low, 'fish') !== false || preg_match($fishRe, $low))) {
+        $label = 'Fish';
+    }
+    // A plain "Hot Dogs" or "Sausage" names no animal at all, so it keeps its
+    // own label rather than being guessed into one of the meats above or
+    // dropped from the chart.
+    if ($label === null && strpos($low, 'hot dog') !== false) $label = 'Hot Dog';
+    if ($label === null && strpos($low, 'sausage') !== false) $label = 'Sausage';
+    if ($label === null) continue;
+    $proteinLbEach[$name] = $lbPerEach;
+    $proteinGroup[$name]  = $label;
+}
+
+// ── Produce sold by the piece ─────────────────────────────────────
+// Most produce crosses a scale and carries its real pounds. The rest is sold
+// by the piece — a head of lettuce, an avocado, a melon — and scans as a count,
+// which the generic $lbPerItem would book at 1 lb whether it is a lime or a
+// watermelon. Where the Inventory page has an Avg Wt for one of these, that
+// figure is used instead, exactly as it is for protein.
+//
+// Membership in produce_lookup is what makes an item produce here; the scan
+// itself says whether that particular pickup was weighed or counted, so no
+// assumption about how the item is "usually" sold is needed.
+//
+// The three maps below partition $lbEach: protein first, then produce, then
+// everything else. They are disjoint by construction, so an item can never be
+// counted under two of them and the SQL needs no cross-checks.
+$produceNames = [];
+foreach ($db->query("SELECT DISTINCT generic_name FROM produce_lookup") as $r) {
+    $produceNames[(string)$r['generic_name']] = true;
+}
+$produceLbEach  = [];   // produce sold by the piece  —  green bar
+$packagedLbEach = [];   // packaged goods with a weight  —  brown bar
+foreach ($lbEach as $n => $w) {
+    if (isset($proteinLbEach[$n]))  continue;
+    if (isset($produceNames[$n])) { $produceLbEach[$n]  = $w; }
+    else                          { $packagedLbEach[$n] = $w; }
+}
+
+// SQL fragments so the splits can happen inside the existing rollup query
+// rather than in a second pass that would have to be re-grouped by month and
+// by channel. With no qualifying items each collapses to a constant false/zero.
+$opImpactWeightSql = function (array $map) use ($db) {
+    if (!$map) return ['0', '0'];
+    $quoted = [];
+    $cases  = '';
+    foreach ($map as $n => $w) {
+        $q        = $db->quote($n);
+        $quoted[] = $q;
+        $cases   .= ' WHEN ' . $q . ' THEN ' . (float)$w;
+    }
+    return [
+        's.generic_name IN (' . implode(',', $quoted) . ')',
+        'CASE s.generic_name' . $cases . ' ELSE 0 END',
+    ];
+};
+[$protIsSql, $protLbEachSql] = $opImpactWeightSql($proteinLbEach);
+[$prodIsSql, $prodLbEachSql] = $opImpactWeightSql($produceLbEach);
+[$pkgIsSql,  $pkgLbEachSql]  = $opImpactWeightSql($packagedLbEach);
+
 // ── openpantry.db: one row per order that moved food ──────────────────────
 // Weighed produce carries its pounds in weight_lbs and a filler quantity of 1,
 // so quantity is only meaningful for the non-produce rows — hence the split
 // conditional sums rather than a single SUM(quantity). Produce sold by the
-// piece is stored with kind='packaged' and correctly lands in the each column.
+// piece is stored with kind='packaged'; where it has an Avg Wt it is converted
+// at that weight in prod_lbs, packaged goods with an Avg Wt convert the same way
+// in pkg_lbs, and only items with no weight on record land in each_qty.
 //
 // Every order with at least one scan counts, including one still open at the
 // moment the report runs: the food is already out the door, and excluding it
@@ -118,9 +268,25 @@ $orderSql = "
         CAST(strftime('%w', o.started_at) AS INTEGER)                   AS dow,
         o.note                                                          AS note,
         ($channelCase)                                                  AS channel,
-        SUM(CASE WHEN s.kind = 'produce' THEN 0 ELSE s.quantity END)    AS each_qty,
-        SUM(CASE WHEN s.kind = 'produce' THEN COALESCE(s.weight_lbs, 0)
+        SUM(CASE WHEN $protIsSql OR $prodIsSql OR $pkgIsSql THEN 0
+                 WHEN s.kind = 'produce' THEN 0 ELSE s.quantity END)    AS each_qty,
+        SUM(CASE WHEN $protIsSql THEN 0
+                 WHEN s.kind = 'produce' THEN COALESCE(s.weight_lbs, 0)
                  ELSE 0 END)                                            AS lbs,
+        SUM(CASE WHEN $prodIsSql AND s.kind <> 'produce'
+                 THEN s.quantity * ($prodLbEachSql) ELSE 0 END)         AS prod_lbs,
+        SUM(CASE WHEN $prodIsSql AND s.kind <> 'produce'
+                 THEN s.quantity ELSE 0 END)                            AS prod_qty,
+        SUM(CASE WHEN $pkgIsSql AND s.kind <> 'produce'
+                 THEN s.quantity * ($pkgLbEachSql) ELSE 0 END)          AS pkg_lbs,
+        SUM(CASE WHEN $pkgIsSql AND s.kind <> 'produce'
+                 THEN s.quantity ELSE 0 END)                            AS pkg_qty,
+        SUM(CASE WHEN $protIsSql THEN
+                      CASE WHEN s.kind = 'produce' THEN COALESCE(s.weight_lbs, 0)
+                           ELSE s.quantity * ($protLbEachSql) END
+                 ELSE 0 END)                                            AS prot_lbs,
+        SUM(CASE WHEN $protIsSql AND s.kind <> 'produce'
+                 THEN s.quantity ELSE 0 END)                            AS prot_qty,
         COUNT(s.id)                                                     AS scans
     FROM orders o
     JOIN scans s ON s.order_id = o.id
@@ -134,12 +300,21 @@ $orderRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $totOrders   = count($orderRows);
 $totEach     = 0;
 $totLbs      = 0.0;
+$totProtLbs  = 0.0;   // fresh/frozen protein, at each item's own Avg Wt
+$totProtQty  = 0;
+$totWeighed  = 0.0;   // produce that actually crossed a scale
+$totProdLbs  = 0.0;   // produce sold by the piece, at each item's own Avg Wt
+$totProdQty  = 0;
+$totPkgLbs   = 0.0;   // packaged goods with an Avg Wt, at that weight
+$totPkgQty   = 0;
 $totScans    = 0;
 
 // Per-month and per-channel rollups, all zero-filled up front so the chart
 // arrays line up with $months / $channels without any isset() dancing.
-$mLbs    = array_fill_keys($months, 0.0);  // measured produce pounds
-$mEach   = array_fill_keys($months, 0);    // counted packaged/each items
+$mLbs    = array_fill_keys($months, 0.0);  // produce: weighed + by the piece
+$mEach   = array_fill_keys($months, 0);    // counted items with no Avg Wt
+$mPkg    = array_fill_keys($months, 0.0);  // packaged goods at their own Avg Wt
+$mProt   = array_fill_keys($months, 0.0);  // fresh/frozen protein pounds
 $mOrders = array_fill_keys($months, 0);
 $mAdults = array_fill_keys($months, 0);    // from delivery notes (see below)
 $mKids   = array_fill_keys($months, 0);
@@ -149,6 +324,8 @@ foreach ($channels as $c) $mChan[$c] = array_fill_keys($months, 0);
 $chanOrders = array_fill_keys($channels, 0);
 $chanEach   = array_fill_keys($channels, 0);
 $chanLbs    = array_fill_keys($channels, 0.0);
+$chanProt   = array_fill_keys($channels, 0.0);
+$chanPkg    = array_fill_keys($channels, 0.0);
 
 $dowOrders  = array_fill(0, 7, 0);         // 0 = Sunday
 
@@ -162,15 +339,31 @@ foreach ($orderRows as $r) {
     $m   = (string)$r['month'];
     $ch  = (string)$r['channel'];
     $ea  = (int)$r['each_qty'];
-    $lb  = (float)$r['lbs'];
+    // Produce reports as one figure everywhere on the page: pounds off the
+    // scale plus by-the-piece produce at its own Avg Wt. The two halves are
+    // kept apart only for the Methodology card, which states each separately.
+    $wl  = (float)$r['lbs'];
+    $pd  = (float)$r['prod_lbs'];
+    $lb  = $wl + $pd;
+    $pl  = (float)$r['prot_lbs'];
+    $pk  = (float)$r['pkg_lbs'];
 
-    $totEach  += $ea;
-    $totLbs   += $lb;
-    $totScans += (int)$r['scans'];
+    $totEach    += $ea;
+    $totLbs     += $lb;
+    $totWeighed += $wl;
+    $totProdLbs += $pd;
+    $totProdQty += (int)$r['prod_qty'];
+    $totPkgLbs  += $pk;
+    $totPkgQty  += (int)$r['pkg_qty'];
+    $totProtLbs += $pl;
+    $totProtQty += (int)$r['prot_qty'];
+    $totScans   += (int)$r['scans'];
 
     if (isset($monthIndex[$m])) {
         $mLbs[$m]    += $lb;
         $mEach[$m]   += $ea;
+        $mPkg[$m]    += $pk;
+        $mProt[$m]   += $pl;
         $mOrders[$m] += 1;
         if (isset($mChan[$ch][$m])) $mChan[$ch][$m] += 1;
     }
@@ -178,6 +371,8 @@ foreach ($orderRows as $r) {
         $chanOrders[$ch] += 1;
         $chanEach[$ch]   += $ea;
         $chanLbs[$ch]    += $lb;
+        $chanPkg[$ch]    += $pk;
+        $chanProt[$ch]   += $pl;
     }
     $d = (int)$r['dow'];
     if ($d >= 0 && $d <= 6) $dowOrders[$d]++;
@@ -210,19 +405,27 @@ $unscannedStmt = $db->prepare(
 $unscannedStmt->execute([':ds' => $dateStart, ':de' => $dateEnd]);
 $unscannedDays = (int)$unscannedStmt->fetchColumn();
 
-// Estimated total pounds: measured produce + counted items at $lbPerItem each.
-$estLbs   = $totLbs + $totEach * $lbPerItem;
+// Estimated total pounds. Every item with an Avg Wt contributes at that
+// weight; only what has no weight on record falls back to $lbPerItem. The
+// streams are disjoint by construction (see the three maps above), so nothing
+// is double counted and the stacked month chart sums back to this figure.
+$estLbs   = $totLbs + $totProtLbs + $totPkgLbs + $totEach * $lbPerItem;
 $estMeals = $lbPerMeal > 0 ? (int)round($estLbs / $lbPerMeal) : 0;
 
 // ── Top items ─────────────────────────────────────────────────────────────
 // One row per generic name. An item is called produce when most of its scans
 // were produce scans — either weighed (kind='produce') or a produce PLU sold by
-// the piece (in produce_lookup), matching usage_report.php's category rule.
+// the piece (in produce_lookup), matching usage_report.php's category rule —
+// and never when the barcode is a store-printed item label. Those
+// record as packaged now; the test still earns its keep on rows written while
+// the station read the label's embedded weight and filed them as kind='produce'
+// without their being produce at all.
 $topSql = "
     SELECT
         s.generic_name,
         COUNT(*)                                                          AS scans,
-        SUM(CASE WHEN pl.code IS NOT NULL OR s.kind = 'produce'
+        SUM(CASE WHEN " . storeLabelSql('s.barcode') . " THEN 0
+                 WHEN pl.code IS NOT NULL OR s.kind = 'produce'
                  THEN 1 ELSE 0 END)                                       AS produce_scans,
         SUM(CASE WHEN s.kind = 'produce' THEN 0 ELSE s.quantity END)      AS each_qty,
         SUM(CASE WHEN s.kind = 'produce' THEN COALESCE(s.weight_lbs, 0)
@@ -236,35 +439,91 @@ $topStmt = $db->prepare($topSql);
 $topStmt->execute([':rs' => $rangeStart, ':re' => $rangeEnd]);
 $topRows = [];
 foreach ($topStmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+    $name = (string)$r['generic_name'];
     $each = (int)$r['each_qty'];
     $lbs  = (float)$r['lbs'];
+    // Any item with an Avg Wt converts at it, exactly as in the rollups above;
+    // $lbPerItem is the fallback for everything with no weight on record.
+    $isProt  = isset($proteinLbEach[$name]);
+    $perEach = $lbEach[$name] ?? $lbPerItem;
     $topRows[] = [
-        'name'     => (string)$r['generic_name'],
-        'category' => ((int)$r['produce_scans'] * 2 > (int)$r['scans']) ? 'produce' : 'packaged',
+        'name'     => $name,
+        'category' => $isProt
+            ? 'protein'
+            : ((((int)$r['produce_scans'] * 2 > (int)$r['scans'])) ? 'produce' : 'packaged'),
         'each'     => $each,
         'lbs'      => $lbs,
         // Ranked on estimated pounds so a case of apples and a case of soup are
         // comparable; the table still shows each measure in its own unit.
-        'est_lbs'  => $lbs + $each * $lbPerItem,
+        'est_lbs'  => $lbs + $each * $perEach,
     ];
 }
 usort($topRows, function ($a, $b) { return $b['est_lbs'] <=> $a['est_lbs']; });
 $topN = array_slice($topRows, 0, 15);
 
+// Produce only, for the fresh-produce chart. The Top Items Detail table below
+// still reports the overall top 15 across all three categories.
+$topProduce = array_slice(array_values(array_filter($topRows, function ($r) {
+    return $r['category'] === 'produce';
+})), 0, 15);
+
+// Protein rolled up to the meat. Several generic names collapse onto one bar —
+// Pork Loin Fillet and Pork Chops are both Pork — so this is a handful of bars,
+// not fifteen, whenever the pantry stocks fewer than fifteen kinds of meat.
+$protGroups = [];
+foreach ($topRows as $r) {
+    if ($r['category'] !== 'protein') continue;
+    $g = $proteinGroup[$r['name']] ?? 'Other';
+    if (!isset($protGroups[$g])) {
+        $protGroups[$g] = ['name' => $g, 'lbs' => 0.0, 'each' => 0, 'est_lbs' => 0.0, 'items' => 0];
+    }
+    $protGroups[$g]['lbs']     += $r['lbs'];
+    $protGroups[$g]['each']    += $r['each'];
+    $protGroups[$g]['est_lbs'] += $r['est_lbs'];
+    $protGroups[$g]['items']   += 1;
+}
+$protN = array_values($protGroups);
+usort($protN, function ($a, $b) { return $b['est_lbs'] <=> $a['est_lbs']; });
+$protN = array_slice($protN, 0, 15);
+
+// Canned and packaged goods, ranked by count. Everything that is neither
+// produce nor fresh protein lands here — the shelf-stable middle of the pantry
+// — and it is ranked by the number of items handed out rather than by pounds:
+// those are the least certain figures on the page, and a household carries
+// home cans and boxes, not pounds of can. Rows with no counted scans are
+// skipped so a stray weighed row cannot draw a zero-length bar.
+$topPackaged = array_values(array_filter($topRows, function ($r) {
+    return $r['category'] === 'packaged' && $r['each'] > 0;
+}));
+usort($topPackaged, function ($a, $b) { return $b['each'] <=> $a['each']; });
+$topPackaged = array_slice($topPackaged, 0, 15);
+
 // ── Sourcing: donated vs purchased ────────────────────────────────────────
 // inventory.restocked_* are lifetime running totals maintained by the Restock
 // page — there is no per-batch log, so this mix is all-time and does NOT follow
 // the date filter. Labelled as such wherever it appears.
+//
+// Same weighting rule as the rest of the page: a row already counted in lb is
+// taken as is, a row counted by the piece converts at its own Avg Wt, and only
+// a row with no Avg Wt falls back to $lbPerItem.
 $srcRow = $db->query("
     SELECT
         COALESCE(SUM(CASE WHEN unit = 'lb' THEN restocked_purchased ELSE 0 END), 0) AS p_lb,
-        COALESCE(SUM(CASE WHEN unit <> 'lb' THEN restocked_purchased ELSE 0 END), 0) AS p_each,
-        COALESCE(SUM(CASE WHEN unit = 'lb' THEN restocked_donated   ELSE 0 END), 0) AS d_lb,
-        COALESCE(SUM(CASE WHEN unit <> 'lb' THEN restocked_donated   ELSE 0 END), 0) AS d_each
+        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each > 0
+                          THEN restocked_purchased * lb_per_each ELSE 0 END), 0)    AS p_wt,
+        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each <= 0
+                          THEN restocked_purchased ELSE 0 END), 0)                  AS p_each,
+        COALESCE(SUM(CASE WHEN unit = 'lb' THEN restocked_donated ELSE 0 END), 0)   AS d_lb,
+        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each > 0
+                          THEN restocked_donated * lb_per_each ELSE 0 END), 0)      AS d_wt,
+        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each <= 0
+                          THEN restocked_donated ELSE 0 END), 0)                    AS d_each
     FROM inventory
 ")->fetch(PDO::FETCH_ASSOC) ?: [];
-$purchasedLbs = (float)($srcRow['p_lb'] ?? 0) + (float)($srcRow['p_each'] ?? 0) * $lbPerItem;
-$donatedLbs   = (float)($srcRow['d_lb'] ?? 0) + (float)($srcRow['d_each'] ?? 0) * $lbPerItem;
+$purchasedLbs = (float)($srcRow['p_lb'] ?? 0) + (float)($srcRow['p_wt'] ?? 0)
+              + (float)($srcRow['p_each'] ?? 0) * $lbPerItem;
+$donatedLbs   = (float)($srcRow['d_lb'] ?? 0) + (float)($srcRow['d_wt'] ?? 0)
+              + (float)($srcRow['d_each'] ?? 0) * $lbPerItem;
 $sourcedLbs   = $purchasedLbs + $donatedLbs;
 $donatedPct   = $sourcedLbs > 0 ? round(100 * $donatedLbs / $sourcedLbs) : 0;
 
@@ -414,6 +673,7 @@ renderNav('impact');
           letter-spacing:.5px; color:#fff; border-radius:4px; padding:2px 7px; }
   .pill.produce  { background: var(--green); }
   .pill.packaged { background: var(--brown); }
+  .pill.protein  { background: #A2453C; }
   .total-row td { font-weight:700; background:var(--cat-bg); border-top:2px solid var(--border); }
   .meter { height:9px; border-radius:5px; background:var(--cat-bg); overflow:hidden; min-width:70px; }
   .meter > span { display:block; height:100%; background:var(--green); border-radius:5px; }
@@ -508,7 +768,8 @@ renderNav('impact');
   <div class="card">
     <h2>By the Numbers</h2>
     <div class="stat-grid">
-      <div class="stat"><div class="v"><?= opN($totLbs) ?></div><div class="k">Produce lb (weighed)</div></div>
+      <div class="stat"><div class="v"><?= opN($totLbs) ?></div><div class="k">Produce lb</div></div>
+      <div class="stat"><div class="v"><?= opN($totProtLbs) ?></div><div class="k">Protein lb (est.)</div></div>
       <div class="stat"><div class="v"><?= opN($totEach) ?></div><div class="k">Items (counted)</div></div>
       <div class="stat"><div class="v"><?= opN($totScans) ?></div><div class="k">Scans Recorded</div></div>
       <div class="stat"><div class="v"><?= $totOrders > 0 ? opN($estLbs / $totOrders, 1) : '—' ?></div><div class="k">Est. lb per Household</div></div>
@@ -522,9 +783,12 @@ renderNav('impact');
   <div class="card">
     <h2>📈 Food Distributed by Month</h2>
     <p class="lede" style="margin-bottom:10px;">
-      Bars split the estimated total into <strong>weighed produce</strong> and
-      <strong>counted packaged goods</strong> converted at
-      <?= htmlspecialchars((string)$lbPerItem) ?> lb each. The line is households
+      Bars split the estimated total three ways: <strong>produce</strong>,
+      <strong>fresh &amp; frozen protein</strong>, and <strong>packaged
+      goods</strong>. Every item with an <strong>Avg Wt (lb ea)</strong> on the
+      Inventory page is converted at that weight; only items with no weight on
+      record fall back to <?= htmlspecialchars((string)$lbPerItem) ?> lb each.
+      The three are mutually exclusive, so nothing is counted twice. The line is households
       served, on its own axis &mdash; when it tracks the bars, each household is
       getting a steady amount rather than a shrinking share.
     </p>
@@ -551,13 +815,43 @@ renderNav('impact');
   </div>
 
   <div class="card">
-    <h2>🥕 Top 15 Items Distributed</h2>
+    <h2>🥕 Top Fresh Produce Items Distributed</h2>
     <p class="lede" style="margin-bottom:10px;">
-      Ranked by estimated pounds so weighed produce and counted goods can share
-      one axis. Green bars are produce &mdash; a tall green block is the fresh-food
-      share of the pantry's output.
+      Fresh produce only, ranked by pounds.
     </p>
-    <div class="chart-wrap" style="height:<?= max(280, count($topN) * 26 + 70) ?>px;"><canvas id="topChart"></canvas></div>
+    <?php if ($topProduce): ?>
+      <div class="chart-wrap" style="height:<?= max(280, count($topProduce) * 26 + 70) ?>px;"><canvas id="topChart"></canvas></div>
+    <?php else: ?>
+      <div class="no-data">No produce scanned in this period.</div>
+    <?php endif; ?>
+  </div>
+
+  <div class="card">
+    <h2>🥩 Top Fresh or Frozen Protein Items Distributed</h2>
+    <p class="lede" style="margin-bottom:10px;">
+      Meat and fish, ranked by pounds by using the average weight per item.
+    </p>
+    <?php if ($protN): ?>
+      <div class="chart-wrap" style="height:<?= max(240, count($protN) * 32 + 70) ?>px;"><canvas id="proteinChart"></canvas></div>
+    <?php else: ?>
+      <div class="no-data">
+        No fresh or frozen protein recorded in this period. Set an
+        <strong>Avg Wt (lb ea)</strong> on the Inventory page for the meat and
+        fish the pantry hands out, and it will appear here.
+      </div>
+    <?php endif; ?>
+  </div>
+
+  <div class="card">
+    <h2>🥫 Top Canned or Packaged Items Distributed</h2>
+    <p class="lede" style="margin-bottom:10px;">
+      Canned and packaged goods only, ranked by count.
+    </p>
+    <?php if ($topPackaged): ?>
+      <div class="chart-wrap" style="height:<?= max(280, count($topPackaged) * 26 + 70) ?>px;"><canvas id="packagedChart"></canvas></div>
+    <?php else: ?>
+      <div class="no-data">No canned or packaged goods scanned in this period.</div>
+    <?php endif; ?>
   </div>
 
   <div class="two-up" style="margin-bottom:20px;">
@@ -637,6 +931,7 @@ renderNav('impact');
           <th>Month</th>
           <th class="num">Households</th>
           <th class="num">Produce lb</th>
+          <th class="num">Protein lb</th>
           <th class="num">Items</th>
           <th class="num">Est. lb</th>
           <th class="num">Est. Meals</th>
@@ -645,11 +940,12 @@ renderNav('impact');
       </thead>
       <tbody>
         <?php foreach ($months as $i => $m):
-          $eLbs = $mLbs[$m] + $mEach[$m] * $lbPerItem; ?>
+          $eLbs = $mLbs[$m] + $mProt[$m] + $mPkg[$m] + $mEach[$m] * $lbPerItem; ?>
         <tr>
           <td><?= htmlspecialchars($monthLabels[$i]) ?></td>
           <td class="num"><?= opN($mOrders[$m]) ?></td>
           <td class="num"><?= opN($mLbs[$m], 1) ?></td>
+          <td class="num"><?= opN($mProt[$m], 1) ?></td>
           <td class="num"><?= opN($mEach[$m]) ?></td>
           <td class="num"><?= opN($eLbs) ?></td>
           <td class="num"><?= $lbPerMeal > 0 ? opN($eLbs / $lbPerMeal) : '—' ?></td>
@@ -662,6 +958,7 @@ renderNav('impact');
           <td>Total</td>
           <td class="num"><?= opN($totOrders) ?></td>
           <td class="num"><?= opN($totLbs, 1) ?></td>
+          <td class="num"><?= opN($totProtLbs, 1) ?></td>
           <td class="num"><?= opN($totEach) ?></td>
           <td class="num"><?= opN($estLbs) ?></td>
           <td class="num"><?= opN($estMeals) ?></td>
@@ -680,6 +977,7 @@ renderNav('impact');
           <th class="num">Households</th>
           <th class="num">Share</th>
           <th class="num">Produce lb</th>
+          <th class="num">Protein lb</th>
           <th class="num">Items</th>
           <th class="num">Est. lb</th>
         </tr>
@@ -687,7 +985,7 @@ renderNav('impact');
       <tbody>
         <?php foreach ($channels as $c):
           if ($chanOrders[$c] === 0) continue;
-          $cEst = $chanLbs[$c] + $chanEach[$c] * $lbPerItem; ?>
+          $cEst = $chanLbs[$c] + $chanProt[$c] + $chanPkg[$c] + $chanEach[$c] * $lbPerItem; ?>
         <tr>
           <td>
             <span class="pill" style="background:<?= htmlspecialchars($channelColor[$c]) ?>;"><?= htmlspecialchars($c) ?></span>
@@ -696,6 +994,7 @@ renderNav('impact');
           <td class="num"><?= opN($chanOrders[$c]) ?></td>
           <td class="num"><?= opPct((float)$chanOrders[$c], (float)$totOrders) ?></td>
           <td class="num"><?= opN($chanLbs[$c], 1) ?></td>
+          <td class="num"><?= opN($chanProt[$c], 1) ?></td>
           <td class="num"><?= opN($chanEach[$c]) ?></td>
           <td class="num"><?= opN($cEst) ?></td>
         </tr>
@@ -782,10 +1081,32 @@ renderNav('impact');
         Request and fill-rate figures come from <code>picklist.db</code> (the PantryPrep
         counter order form). They are different flows and are never summed together.</li>
       <li><strong>Pounds are part measured, part estimated.</strong>
-        <?= opN($totLbs) ?> lb of produce was actually weighed. The other
-        <?= opN($totEach) ?> items were counted, not weighed, and are converted at
+        <?= opN($totWeighed) ?> lb of produce actually crossed a scale. A further
+        <?= opN($totProdQty) ?> pieces of produce sold by the piece
+        (<?= opN($totProdLbs) ?> lb) were counted and converted at each item's own
+        Avg Wt from the Inventory page; the two together are the produce figure
+        shown everywhere on this page. Another <?= opN($totPkgQty) ?> packaged
+        items (<?= opN($totPkgLbs) ?> lb) likewise carry an Avg Wt and convert at
+        it. Only the remaining
+        <?= opN($totEach) ?> items have no per-piece weight on record; those are
+        converted at
         <strong><?= htmlspecialchars((string)$lbPerItem) ?> lb each</strong>. Change that
-        figure at the top of the page and every estimate here follows it.</li>
+        figure at the top of the page and every estimate that still depends on it
+        follows &mdash; setting an Avg Wt on the Inventory page is what takes an
+        item off that assumption for good.</li>
+      <li><strong>Fresh and frozen protein is weighed at its own Avg Wt.</strong>
+        <?= opN($totProtQty) ?> pieces of meat and fish
+        (<?= opN($totProtLbs) ?> lb, <?= opPct($totProtLbs, $estLbs) ?> of the
+        estimated total) carry a per-piece weight set on the Inventory page and
+        are converted at that figure instead of the generic
+        <?= htmlspecialchars((string)$lbPerItem) ?> lb. An item qualifies when its
+        name says what animal it is &mdash; chicken, turkey, beef, veal, pork,
+        ham, bacon, lamb, duck and the other common meats, a fish species such
+        as cod, haddock, pollack or salmon, or a bare hot dog or sausage &mdash;
+        and it has an Avg Wt, and its name does not contain <em>can</em>, so
+        canned chicken, canned tuna and chicken-noodle soup stay in the
+        counted-items bucket. These pounds are subtracted from that bucket,
+        never added on top of it.</li>
       <li><strong>Meals are a conversion, not a count.</strong> Estimated pounds ÷
         <strong><?= htmlspecialchars((string)$lbPerMeal) ?> lb per meal</strong>
         (1.2 lb is the Feeding America convention). No one counts meals directly.</li>
@@ -819,20 +1140,25 @@ renderNav('impact');
   (function () {
     if (typeof Chart === 'undefined') return; // offline / CDN blocked: tables still stand
 
-    var BROWN = '#6B4C11', GREEN = '#8BAF3A', GRID = '#F0EBD8';
+    var BROWN = '#6B4C11', GREEN = '#8BAF3A', GRID = '#F0EBD8', MEAT = '#A2453C';
     Chart.defaults.font.size = 11;
     Chart.defaults.color = '#555';
 
     var monthLabels = <?= json_encode($monthLabels) ?>;
     var produceLbs  = <?= json_encode(array_map(function ($v) { return round($v, 1); }, array_values($mLbs))) ?>;
-    var packagedLbs = <?= json_encode(array_map(function ($v) use ($lbPerItem) { return round($v * $lbPerItem, 1); }, array_values($mEach))) ?>;
+    var packagedLbs = <?= json_encode(array_map(function ($m) use ($mEach, $mPkg, $lbPerItem) {
+        return round($mPkg[$m] + $mEach[$m] * $lbPerItem, 1);
+    }, $months)) ?>;
+    var proteinLbs  = <?= json_encode(array_map(function ($v) { return round($v, 1); }, array_values($mProt))) ?>;
     var monthOrders = <?= json_encode(array_values($mOrders)) ?>;
 
     new Chart(document.getElementById('monthChart'), {
       data: {
         labels: monthLabels,
         datasets: [
-          { type:'bar', label:'Produce (weighed lb)', data:produceLbs, backgroundColor:GREEN,
+          { type:'bar', label:'Produce (lb)', data:produceLbs, backgroundColor:GREEN,
+            stack:'lb', borderRadius:3, order:2 },
+          { type:'bar', label:'Fresh/frozen protein (est. lb)', data:proteinLbs, backgroundColor:MEAT,
             stack:'lb', borderRadius:3, order:2 },
           { type:'bar', label:'Packaged (est. lb)', data:packagedLbs, backgroundColor:BROWN,
             stack:'lb', borderRadius:3, order:2 },
@@ -883,7 +1209,7 @@ renderNav('impact');
 
     var running = 0;
     var cumulative = produceLbs.map(function (v, i) {
-      running += v + packagedLbs[i];
+      running += v + proteinLbs[i] + packagedLbs[i];
       return Math.round(running);
     });
     new Chart(document.getElementById('cumChart'), {
@@ -912,15 +1238,15 @@ renderNav('impact');
             'lbs'   => round($r['lbs'], 1),
             'each'  => $r['each'],
         ];
-    }, $topN)) ?>;
-    new Chart(document.getElementById('topChart'), {
+    }, $topProduce)) ?>;
+    if (top.length) new Chart(document.getElementById('topChart'), {
       type:'bar',
       data:{
         labels: top.map(function (r) { return r.name; }),
         datasets:[{
           label:'Est. lb',
           data: top.map(function (r) { return r.value; }),
-          backgroundColor: top.map(function (r) { return r.cat === 'produce' ? GREEN : BROWN; }),
+          backgroundColor: GREEN,
           borderRadius:4
         }]
       },
@@ -938,6 +1264,87 @@ renderNav('impact');
         scales:{
           x:{ beginAtZero:true, grid:{ color:GRID },
               title:{ display:true, text:'Estimated pounds', color:BROWN, font:{ weight:'bold' } } },
+          y:{ grid:{ display:false } }
+        }
+      }
+    });
+
+    // Fresh/frozen protein, rolled up to the meat. Same axis and tooltip shape
+    // as the produce chart above so the two read as a pair.
+    var prot = <?= json_encode(array_map(function ($r) {
+        return [
+            'name'  => $r['name'],
+            'value' => round($r['est_lbs'], 1),
+            'lbs'   => round($r['lbs'], 1),
+            'each'  => $r['each'],
+            'items' => $r['items'],
+        ];
+    }, $protN)) ?>;
+    if (prot.length) new Chart(document.getElementById('proteinChart'), {
+      type:'bar',
+      data:{
+        labels: prot.map(function (r) { return r.name; }),
+        datasets:[{
+          label:'Est. lb',
+          data: prot.map(function (r) { return r.value; }),
+          backgroundColor: MEAT,
+          borderRadius:4
+        }]
+      },
+      options:{
+        indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{ display:false },
+          tooltip:{ callbacks:{ label: function (c) {
+            var r = prot[c.dataIndex], parts = [];
+            if (r.each > 0) parts.push(r.each + ' pieces');
+            if (r.lbs  > 0) parts.push(r.lbs + ' lb weighed');
+            parts.push(r.items + (r.items === 1 ? ' item' : ' items'));
+            return r.value + ' est. lb (' + parts.join(', ') + ')';
+          } } }
+        },
+        scales:{
+          x:{ beginAtZero:true, grid:{ color:GRID },
+              title:{ display:true, text:'Estimated pounds', color:BROWN, font:{ weight:'bold' } } },
+          y:{ grid:{ display:false } }
+        }
+      }
+    });
+
+    // Canned and packaged goods. Same axis and tooltip shape as the two charts
+    // above, but ranked and drawn by the item count: the estimated weight of a
+    // shelf-stable case is the softest number on the page, while the number of
+    // groceries handed out is scanned fact.
+    var pkg = <?= json_encode(array_map(function ($r) {
+        return [
+            'name'  => $r['name'],
+            'value' => $r['each'],
+            'lbs'   => round($r['est_lbs'], 1),
+        ];
+    }, $topPackaged)) ?>;
+    if (pkg.length) new Chart(document.getElementById('packagedChart'), {
+      type:'bar',
+      data:{
+        labels: pkg.map(function (r) { return r.name; }),
+        datasets:[{
+          label:'Items',
+          data: pkg.map(function (r) { return r.value; }),
+          backgroundColor: BROWN,
+          borderRadius:4
+        }]
+      },
+      options:{
+        indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{ display:false },
+          tooltip:{ callbacks:{ label: function (c) {
+            var r = pkg[c.dataIndex];
+            return r.value + (r.value === 1 ? ' item' : ' items') + ' (' + r.lbs + ' est. lb)';
+          } } }
+        },
+        scales:{
+          x:{ beginAtZero:true, grid:{ color:GRID }, ticks:{ precision:0 },
+              title:{ display:true, text:'Items distributed', color:BROWN, font:{ weight:'bold' } } },
           y:{ grid:{ display:false } }
         }
       }

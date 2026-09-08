@@ -13,11 +13,23 @@ if (!isAuthenticated($db)) {
     exit;
 }
 
+// Reached from the Remap Names button on ../admin/admin.php. A supervisor may
+// look — the inventory table below is the point of the visit as often as the
+// remap is — but rewriting historical order rows is an administrator act, so
+// the form is disabled for them below AND the POST is refused here. The
+// disabled form is a courtesy; this check is the actual rule.
+$isSupervisor = foodscanIsSupervisor();
+
 // ── Handle form submission ────────────────────────────────────────────────────
 $message = '';
 $msgType = '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'remap') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'remap'
+    && $isSupervisor) {
+    $message = 'Supervisor access: this tool is read-only. Sign in with the '
+             . 'administrator password to apply a remap.';
+    $msgType = 'error';
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'remap') {
     $sourceItemName    = trim($_POST['source_item_name']    ?? '');
     $sourceConfigId    = $_POST['source_config_id']  !== '' ? (int)$_POST['source_config_id']  : null;
     $targetConfigId    = (int)($_POST['target_config_id']   ?? 0);
@@ -133,6 +145,7 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
   .msg { border-radius:8px; padding:14px 18px; margin-bottom:20px; font-size:.9rem; }
   .msg.success { background:#D4EDDA; border:1px solid #A8D8B9; color:#276437; }
   .msg.error   { background:#F8D7DA; border:1px solid #F1AEB5; color:#8B1A1A; }
+  .msg.readonly { background:#FFF3CD; border:1px solid #E6D9A8; color:#6B5B11; }
 
   /* ── Main card ── */
   .card {
@@ -166,6 +179,7 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
     width:100%; cursor:pointer;
   }
   .field-group select:focus { outline:none; border-color:var(--green); }
+  .field-group select:disabled { background:#F0EDE4; color:#888; cursor:not-allowed; }
   .field-group .hint { font-size:.75rem; color:#999; }
 
   .preview-box {
@@ -188,6 +202,8 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
   .btn-brown:hover { background:#8B6420; }
   .btn-outline { background:transparent; color:var(--brown); border:2px solid var(--brown); }
   .btn-outline:hover { background:var(--brown); color:#fff; }
+  .btn:disabled { background:#C9BFA4; color:#F5F0E8; cursor:not-allowed; }
+  .btn:disabled:hover { background:#C9BFA4; }
 
   /* ── Inventory table ── */
   .inv-table { width:100%; border-collapse:collapse; font-size:.85rem; }
@@ -234,6 +250,14 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
   <div class="msg <?= $msgType ?>"><?= $message ?></div>
   <?php endif; ?>
 
+  <?php if ($isSupervisor): ?>
+  <div class="msg readonly">
+    🔑 <strong>Supervisor sign-in — this page is read-only.</strong>
+    The inventory below is shown for reference; sign in with the administrator
+    password to apply a remap.
+  </div>
+  <?php endif; ?>
+
   <!-- ── Remap form ── -->
   <div class="card">
     <div class="card-header">🔁 Remap Item</div>
@@ -246,7 +270,8 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
           <!-- Source -->
           <div class="field-group">
             <label for="source_sel">Source — order_items entry to change</label>
-            <select id="source_sel" name="source_item_name" onchange="updatePreview()" required>
+            <select id="source_sel" name="source_item_name" onchange="updatePreview()" required
+                    <?= $isSupervisor ? 'disabled' : '' ?>>
               <option value="">— Select source item —</option>
               <?php foreach ($orderItems as $oi): ?>
               <option value="<?= htmlspecialchars($oi['item_name']) ?>"
@@ -268,7 +293,8 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
           <!-- Target -->
           <div class="field-group">
             <label for="target_sel">Target — config_items canonical item</label>
-            <select id="target_sel" name="target_config_id" onchange="updatePreview()" required>
+            <select id="target_sel" name="target_config_id" onchange="updatePreview()" required
+                    <?= $isSupervisor ? 'disabled' : '' ?>>
               <option value="">— Select target item —</option>
               <?php $prevCat = ''; foreach ($configItems as $ci): ?>
               <?php if ($ci['category'] !== $prevCat): $prevCat = $ci['category']; ?>
@@ -289,7 +315,8 @@ $configItems = $configItemsStmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="preview-box" id="previewBox"></div>
 
         <div class="btn-row">
-          <button type="submit" class="btn btn-brown">🔁 Apply Remap</button>
+          <button type="submit" class="btn btn-brown"
+                  <?= $isSupervisor ? 'disabled title="Sign in with the administrator password to apply a remap"' : '' ?>>🔁 Apply Remap</button>
           <button type="button" class="btn btn-outline" onclick="document.getElementById('remapForm').reset(); document.getElementById('previewBox').classList.remove('visible');">↺ Clear</button>
         </div>
       </form>

@@ -268,6 +268,24 @@ function op_report_rows(PDO $db, array $opts = []): array {
         $inv[$r['generic_name']] = $r;
     }
 
+    // The Ignore Unknown Items placeholder is not an item, so it cannot be
+    // ordered. Its scan history is an unknowable mix — a case of donated cereal
+    // one week and unlabelled rice the next — so the demand model fits noise,
+    // and "order 4 cases of Unidentified" is not an instruction anyone can act
+    // on. Dropped from all three inputs before any of them is read: out of
+    // $hist so no forecast is fitted or cached for it, out of $inv so
+    // include_unscanned can't add it back as a zero-demand row, and out of
+    // $kinds for tidiness.
+    //
+    // This is also what silences a reorder alert on the placeholder, without a
+    // second rule: op_report_alerts() skips any alert whose name has no row.
+    //
+    // Deliberately only here. The placeholder still counts on the usage and
+    // impact reports and still shows on the Inventory page — that is the whole
+    // point of recording it, and the pantry needs to see how much of its volume
+    // is unlisted stock. What it must not do is turn into a purchase order.
+    unset($hist[UNIDENTIFIED_NAME], $inv[UNIDENTIFIED_NAME], $kinds[UNIDENTIFIED_NAME]);
+
     $produceNamesLc = [];
     foreach ($db->query("SELECT generic_name FROM produce_lookup") as $r) {
         $produceNamesLc[strtolower($r['generic_name'])] = true;

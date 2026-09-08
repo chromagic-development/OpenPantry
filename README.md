@@ -56,6 +56,16 @@ whole picture.
   single-station pantry, as does the whole Assist card. Ending or cancelling
   the order releases the helpers back to idle. A common use is a volunteer's
   phone in camera mode assisting the wired laser station on a busy day.
+- **Closing a stranded order.** A station that disappears mid-order — laptop
+  shut, tablet carried off — leaves its order open with nobody able to close
+  it, since only the owning station may End or Cancel. Every other station goes
+  on offering to assist it, and a station in assist mode keeps being pulled
+  back onto it instead of the live order. With an **administrator or supervisor
+  signed in on that device**, each row of the Assist card also carries **End**
+  and **Cancel** buttons that close someone else's order from where you are
+  standing — End deducts its items from inventory exactly as the owning station
+  would have, Cancel discards the order and its scans. Both confirm first, and
+  both are invisible (and refused server-side) without that login.
 - **Generic-name normalization.** Scanned UPCs are stored only as their
   *generic* food name (e.g. `Black Beans`), never the brand, so demand
   aggregates cleanly. The first time a UPC is seen, OpenPantry queries
@@ -196,6 +206,7 @@ openpantry/
 ├── lookup.php         library: barcode → generic name (OFF + OpenAI)
 ├── mailer.php         library: dependency-free SMTP / mail() sender
 ├── api_order.php      JSON: start/end/cancel orders + assist join/leave/sync
+│                       + admin remote end/cancel of another station's order
 ├── api_scan.php       JSON: lookup / record / delete a scan
 ├── api_alert.php      JSON: reorder-alert CRUD + email toggle
 ├── api_openai_test.php       JSON: smoke-test the OpenAI key
@@ -215,6 +226,7 @@ openpantry/
 │   ├── basket_report/           page: basket-size distribution
 │   └── impact_report/           page: impact summary (both databases)
 ├── lookup_admin/      page: manage produce + UPC mappings
+├── deduplicate/       page: merge duplicate generic names (scans, lookups, inventory, alerts)
 ├── settings/          page: OpenAI key, par defaults, network access, admin email/password, SMTP
 ├── logout/            page: clears auth cookie
 └── menucounter/       nested app: customer order form, pick queue, item admin
@@ -280,18 +292,53 @@ NetumScan, etc.) ship as HID keyboard-wedge devices: they type the barcode
 digits, then send a CR/Enter terminator. The scan page assumes that default —
 no driver or pairing beyond the OS keyboard pairing. If your scanner doesn't
 send Enter, reconfigure it via its programming sheet to add a CR (or CR+LF)
-suffix. The recommended hardware setup consists of a Chromebook with a USB
-laser scanner and VEVOR Industrial Scale that includes a RS-232 to USB HID
-interface to automatically enter produce weight in pounds (e.g. 1.120lb).
-Alternatively, all PLU/UPC codes and weights can be entered manually and there
-is a camera option available instead of requiring a laser scanner.
+suffix. The recommended hardware setup is a Chromebook, a USB laser scanner, and
+a USB scale — either a HID Point-of-Sale scale (see below) or a VEVOR Industrial
+Scale with an RS-232-to-USB-HID cable that types produce weight in pounds (e.g.
+1.120lb). Alternatively, all PLU/UPC codes and weights can be entered manually
+and there is a camera option instead of a laser scanner.
 
-The scale sends nothing until a reading settles, and it sends that reading once
-per weighing cycle — there is no continuous stream and no motion/stable flag in
-the data. A weighed produce entry is therefore two halves, a PLU and a weight,
-and **the scan station accepts them in either order with nothing to configure**.
-It tells them apart by what arrives: the scale types decimal pounds with an `lb`
-suffix, a PLU is bare digits, and nothing else on the page looks like either.
+### Two ways to connect a scale
+
+The scan station supports two kinds of scale, and picks up whichever is present
+with nothing to configure.
+
+**USB scale (recommended).** Any scale that implements the USB HID Point-of-Sale
+scale usage page (`0x8D`) — the standard USPS/ShipStation postage software
+speaks, e.g. the DYMO M25 — plugs straight into the Chromebook with no adapter,
+no serial cable, and no drivers. A scale strip above the barcode box shows the
+connection state; the first time, click **Connect Scale** and pick the device.
+That grant is remembered, so every later page load reconnects silently.
+
+This path is not a keyboard: the page reads HID reports directly, so the weight
+never depends on which field has focus and can't collide with the laser
+scanner's keystrokes. The report carries its unit — g, kg, oz or lb all convert
+to pounds automatically. Capture waits for the scale's own *stable* flag **and**
+for the reading to hold near where it started; scales in this class raise that
+flag while the value is still creeping, so a single stable report is not
+trusted. Two hold windows keep that from feeling sluggish (both in
+`scan/scan.php`): `HID_SETTLE_FAST_MS` (~350 ms) when consecutive reports read
+*identically* — a parked value, which is what a genuinely settled item looks
+like — and `HID_SETTLE_MS` (~700 ms) when it is still jittering inside the
+tolerance. A creeping weight changes on every report by definition, so it can
+never take the fast path. Needs a
+Chromium browser (Chrome, Edge, ChromeOS); stations without WebHID simply don't
+see the strip.
+
+Because the report layout is a published standard rather than a vendor format,
+any HID-compliant scale works — you are not tied to one model.
+
+**Keyboard-wedge scale (the original path).** The VEVOR-style setup, where an
+RS-232-to-USB-HID cable types decimal pounds with an `lb` suffix as if someone
+had typed them. Still fully supported and unchanged.
+
+### Either order, either scale
+
+A weighed produce entry is two halves, a PLU and a weight, and **the scan
+station accepts them in either order with nothing to configure**. On the wedge
+path it tells them apart by what arrives: the scale types decimal pounds with an
+`lb` suffix, a PLU is bare digits, and nothing else on the page looks like
+either.
 
 - **Scan the PLU first** — the “Weight required” window opens and the scale (or
   the keypad) fills it in.
@@ -299,17 +346,71 @@ suffix, a PLU is bare digits, and nothing else on the page looks like either.
   settles the scale transmits on its own; the station holds the reading, beeps,
   and asks for the PLU. Scan the code and both halves are recorded together.
 
-Either way, **clear the platform afterwards**: the scale only arms the next
-transmission once it returns to zero. Weighing first needs the scale in “PC”
-mode (press `.` then `9`) rather than “print” mode; in “print” mode it sends
-only when the PRINT key is pressed, which still lands in the “Weight required”
-window if that is open.
+Either way, **clear the platform afterwards**: the station will not capture a
+second item until the scale returns to zero. On a wedge scale this is also a
+hardware rule — it only arms its next transmission once cleared — and weighing
+first needs it in “PC” mode (press `.` then `9`) rather than “print” mode.
+
+**One weight at a time.** A captured weight is held until its PLU is entered or
+it is discarded, and while it is held the station refuses to weigh anything
+else — the strip says **“No PLU entered.”** and there is no beep. The refused
+reading is *discarded*, not queued: an item put on by mistake while the window
+is open is ignored outright rather than springing a second PLU prompt the moment
+the first is finished. To weigh it for real, take it off and put it back on.
+Without that rule, removing the item and setting down another rearms the scale,
+and each new weighing silently replaces the one being identified.
 
 Volunteers can switch between the two orders mid-order without telling the app,
 and the manual keypad fallback always works, so an unplugged scale doesn't stop
-the station. A weight the scale sends twice for one item is recognized as an
-echo and ignored, and a scale left in kilograms is refused outright rather than
-recorded as pounds.
+the station.
+
+Guardrails differ slightly by path. On the wedge path a weight sent twice for
+one item is recognized as an echo and ignored, and a scale left in kilograms is
+refused outright rather than recorded as pounds. On the USB path neither can
+happen: the return-to-zero rule already prevents a double capture, and units are
+converted rather than refused. The USB path adds messages the wedge can't
+produce — over-capacity, scale fault, needs re-zeroing, and disconnection.
+
+**“Make sure scale is on.”** Postal scales power themselves down to save their
+batteries, and a switched-off scale looks exactly like one nobody has touched —
+both simply stop changing. The station beeps and shows that message in two
+situations, and any real change to the weight clears it:
+
+- **No usable reading within ~12 seconds of connecting** (`SCALE_STARTUP_MS`).
+  This is the page-load case: the scale was never switched on. Answered in
+  seconds rather than making the operator wait out the idle timeout below.
+- **The weight has not changed for three minutes** (`SCALE_IDLE_MS`) — the scale
+  was on and has since gone to sleep.
+
+Until a first reading arrives the strip reads **“Scale connected — waiting for a
+reading…”** rather than claiming ready, since a switched-off scale would
+otherwise look fine.
+
+### Printing labels for items with no barcode
+
+Butter tubs, halal meat, diapers and anything else that arrives unlabelled needs
+a barcode of its own. `docs/make_barcode_sheets.py` prints two sheets: in-store
+UPC-A labels for those items, and Code128 PLU labels for loose produce.
+
+```bash
+python docs/make_barcode_sheets.py --db /path/to/openpantry.db
+```
+
+In-store labels use the GS1 prefix-2 range, `2 IIIII VVVVV C`, where `IIIII` is
+the item and `VVVVV` is a variable measure a retail scale rewrites for every
+package. **The item number has to live in `IIIII`.** Lookups key these on the
+leading six digits precisely because the trailing five are not stable, so a
+sheet that instead counts up in `VVVVV` files every item it lists under one key
+— and naming any one of them then names all of them. The generator pins `VVVVV`
+to `00000`; nothing on these sheets is weighed.
+
+Item numbers are read back from `upc_lookup` rather than reassigned, so a
+reprint cannot repoint a label that is already on a shelf. `--add FILE` appends
+new names at the next free number and prints the mappings to enter under Lookup
+Tables; `--items FILE` works with no database at all, for a new install. Keys
+outside the pantry's reserved block (`--block`, default `1-999`) are the
+retailer's own deli and bakery labels and are listed as skipped rather than
+reprinted.
 
 ## Open Food Facts notes
 

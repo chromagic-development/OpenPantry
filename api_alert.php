@@ -11,6 +11,12 @@ if ($action === 'add') {
     $name  = trim((string)($_POST['generic_name'] ?? ''));
     $lt    = max(1, (int)($_POST['lead_time_days'] ?? 0));
     $email = !empty($_POST['email']) ? 1 : 0;
+    // The Ignore Unknown Items placeholder never gets an Order Report row, so an
+    // alert on it could never fire anyway (op_report_alerts skips alerts with no
+    // row). Refuse it outright rather than storing a reminder that sits enabled
+    // and silent forever. The Order Report's own picker can't offer it — this
+    // covers a stale form or a hand-posted request.
+    if ($name === UNIDENTIFIED_NAME) $name = '';
     if ($name !== '' && $lt > 0) {
         $ins = $db->prepare(
             "INSERT INTO alerts (generic_name, lead_time_days, enabled, email_enabled) VALUES (?, ?, 1, ?)"

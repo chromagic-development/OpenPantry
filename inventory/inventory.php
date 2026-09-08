@@ -355,7 +355,8 @@ renderNav('inventory');
           <tr data-name="<?= htmlspecialchars(strtolower($name)) ?>" data-kind="<?= htmlspecialchars($kinds[$name] ?? 'packaged') ?>">
             <td class="inv-name">
               <input type="hidden" name="name[<?= $i ?>]" value="<?= htmlspecialchars($name) ?>">
-              <?= htmlspecialchars($name) ?></td>
+              <?= htmlspecialchars($name) ?>
+            </td>
             <td style="text-align:center;">
               <input type="checkbox"
                      name="deliverable[<?= $i ?>]"
@@ -363,18 +364,12 @@ renderNav('inventory');
                      class="inv-check">
             </td>
             <td class="num">
-              <div class="inv-counter">
-                <button type="button" class="inv-btn inv-btn-dec"
-                        aria-label="Decrement" onclick="bumpCount(this, -1)">−</button>
-                <input type="number"
-                       step="<?= $isEach ? '1' : '0.01' ?>"
-                       min="0"
-                       class="inv-count-input"
-                       name="count[<?= $i ?>]"
-                       value="<?= htmlspecialchars((string)$count) ?>">
-                <button type="button" class="inv-btn inv-btn-inc"
-                        aria-label="Increment" onclick="bumpCount(this, 1)">+</button>
-              </div>
+              <input type="number"
+                     step="<?= $isEach ? '1' : '0.01' ?>"
+                     min="0"
+                     class="inv-count-input"
+                     name="count[<?= $i ?>]"
+                     value="<?= htmlspecialchars((string)$count) ?>">
             </td>
             <td>
               <select name="unit[<?= $i ?>]" onchange="syncStep(this)">
@@ -435,11 +430,11 @@ renderNav('inventory');
   /* min-width is the phone floor: below it the wrapper scrolls rather than
      squeezing the selects and the count field down to unusable slivers. Any
      card wider than this (every desktop and tablet width) fits with no scroll. */
-  #invTable { table-layout: fixed; min-width: 860px; }
+  #invTable { table-layout: fixed; min-width: 760px; }
   /* Percentages total 100 — the widths below are the whole budget. */
-  #invTable .c-name  { width: 14%; }
+  #invTable .c-name  { width: 20%; }
   #invTable .c-del   { width:  8%; }
-  #invTable .c-count { width: 16%; }
+  #invTable .c-count { width: 10%; }
   #invTable .c-unit  { width:  7%; }
   #invTable .c-ounit { width:  8%; }
   #invTable .c-lbea  { width:  7%; }
@@ -467,55 +462,18 @@ renderNav('inventory');
      field's tooltip). */
   #invTable .inv-alt { font-size: .7rem; text-overflow: ellipsis; }
   #invTable input[type=number] { text-align: right; }
-  /* Spinner arrows cost ~15px per number field and the count already has its
-     own +/- buttons, so drop them. */
+  /* Spinner arrows cost ~15px per number field across eight number columns,
+     so drop them — these fields are typed into. */
   #invTable input[type=number]::-webkit-outer-spin-button,
   #invTable input[type=number]::-webkit-inner-spin-button {
     -webkit-appearance: none; margin: 0;
   }
   #invTable input[type=number] { -moz-appearance: textfield; }
-  /* The count input flexes into whatever the buttons leave, so the counter
-     always fits its column. */
-  .inv-counter { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
-  /* Explicit flex-basis, not auto: a number input's intrinsic width is far
-     wider than the column and would otherwise shrink the buttons instead. */
-  .inv-count-input { flex: 1 1 50px; min-width: 50px; text-align: right; }
-  #invTable .inv-count-input { font-size: .9rem; padding: 6px 4px; }
-  /* The buttons hold 44px wherever there's room and give ground before the
-     count field does, so the counter never spills out of its column. */
-  .inv-btn {
-    flex: 0 1 44px; width: 44px; min-width: 30px; height: 44px;
-    font-size: 1.5rem; font-weight: 800; line-height: 1;
-    padding: 0; cursor: pointer;
-    border: 1px solid var(--border); border-radius: 10px;
-    background: #fafaf5; color: var(--brown);
-    touch-action: manipulation; user-select: none;
-  }
-  .inv-btn:hover  { filter: brightness(.97); }
-  .inv-btn:active { transform: scale(.94); }
-  .inv-btn-dec   { color: var(--red); }
-  .inv-btn-inc   { color: var(--green); }
+  /* The count is the one figure being entered on every row, so it is set a
+     touch larger than the rest of the fields. */
+  #invTable .inv-count-input { font-size: .9rem; padding: 6px 4px; text-align: right; }
 </style>
 <script>
-// Tap-friendly increment/decrement. Increments by 1 regardless of unit so the
-// button feels useful on a phone; users can still type fractional lb directly.
-function bumpCount(btn, delta) {
-  var wrap  = btn.closest('.inv-counter');
-  var input = wrap.querySelector('input[type=number]');
-  if (!input) return;
-  var cur = parseFloat(input.value);
-  if (isNaN(cur)) cur = 0;
-  var next = cur + delta;
-  if (next < 0) next = 0;
-  var isEach = parseFloat(input.step) >= 1;
-  if (isEach) {
-    input.value = String(Math.round(next));
-  } else {
-    // Mirror server-side display: up to 2 decimals, trim trailing zeros.
-    input.value = (next.toFixed(2).replace(/\.?0+$/, '') || '0');
-  }
-}
-
 // When the unit dropdown flips between each/lb, retune the count input's
 // step so the spinner moves in whole units for 'each' and 0.01 for 'lb',
 // and round any visible value to match.
@@ -603,12 +561,12 @@ function printInventory() {
   var rows  = document.querySelectorAll('#invTable tbody tr');
   var items = [];
   rows.forEach(function(tr) {
-    var nameCell = tr.querySelector('td');
+    var nameIn   = tr.querySelector('input[type="hidden"][name^="name["]');
     var input    = tr.querySelector('.inv-count-input');
     var unitSel  = tr.querySelector('select[name^="unit"]');
-    if (!nameCell || !input) return;
+    if (!nameIn || !input) return;
     items.push({
-      name:  (nameCell.textContent || '').trim(),
+      name:  (nameIn.value || '').trim(),
       count: (input.value || '').trim(),
       unit:  unitSel ? unitSel.value : ''
     });

@@ -425,6 +425,144 @@ function clearOrderAssists(int $orderId): void {
     getDB()->prepare("DELETE FROM order_assists WHERE order_id=?")->execute([$orderId]);
 }
 
+// ── Ending and cancelling an order ──────────────────────────────────────────
+// The mechanics only, split out of api_order.php so the owner station's End /
+// Cancel buttons and an administrator closing a stranded order that belongs to
+// some other station run exactly the same code. Neither function decides *who*
+// may do this, and both assume the order is open — the endpoint checks both.
+
+// Close an order and deduct what went out the door from inventory. Returns the
+// ended_at it wrote, so the caller reports the timestamp actually stored.
+function endOrderById(int $orderId): string {
+    $db = getDB();
+    $endedAt = now();
+    $db->prepare("UPDATE orders SET status='closed', ended_at=? WHERE id=?")
+       ->execute([$endedAt, $orderId]);
+    // Release the helpers: their next sync sees no order and drops to idle.
+    clearOrderAssists($orderId);
+
+    // Decrement inventory by what was scanned in this order so the inventory
+    // count reflects what just left the building.
+    $items = $db->prepare(
+        "SELECT generic_name, SUM(quantity) qty, SUM(COALESCE(weight_lbs,0)) wt, kind
+         FROM scans WHERE order_id=? GROUP BY generic_name"
+    );
+    $items->execute([$orderId]);
+    $exists = $db->prepare('SELECT 1 FROM inventory WHERE generic_name=?');
+    $update = $db->prepare(
+        "UPDATE inventory SET count = MAX(0, count - ?), updated_at=? WHERE generic_name=?"
+    );
+    foreach ($items->fetchAll() as $row) {
+        $delta = ($row['kind'] === 'produce') ? (float)$row['wt'] : (float)$row['qty'];
+        // Only decrement existing inventory rows. Closing an order shouldn't
+        // imply "the prior count was zero" for an item never counted.
+        $exists->execute([$row['generic_name']]);
+        if ($exists->fetchColumn()) {
+            $update->execute([$delta, $endedAt, $row['generic_name']]);
+        }
+    }
+    return $endedAt;
+}
+
+// Cancellation = "this order didn't happen". Wipe its scans so they don't
+// pollute the demand history, drop the order row, and reset the AUTOINCREMENT
+// high-water mark to the surviving MAX(id). When the cancelled order was the
+// newest, this reuses its number instead of skipping it; with another
+// station's order still open, MAX(id) is that order so seq is left effectively
+// unchanged. Either way the next insert is MAX(id)+1, so no live id is ever
+// collided with. Returns when it happened.
+function cancelOrderById(int $orderId): string {
+    $db = getDB();
+    $db->beginTransaction();
+    $db->prepare("DELETE FROM scans WHERE order_id=?")->execute([$orderId]);
+    // Before the order row, so the order_assists foreign key still resolves.
+    $db->prepare("DELETE FROM order_assists WHERE order_id=?")->execute([$orderId]);
+    $db->prepare("DELETE FROM orders WHERE id=?")->execute([$orderId]);
+    $db->exec(
+        "UPDATE sqlite_sequence SET seq = (SELECT IFNULL(MAX(id), 0) FROM orders) WHERE name='orders'"
+    );
+    $db->commit();
+    return now();
+}
+
+// ── Sticky assist mode ──────────────────────────────────────────────
+// Joining an order also switches this station into assist mode, and it stays
+// there until Leave Assist. clearOrderAssists() still drops the helper the
+// moment the order closes, but the mode outlives it: on the next poll the
+// station picks up whatever order is open now, so a dedicated helper works
+// consecutive households without re-joining between each one.
+
+// Is this station in assist mode? True both while it is helping an order and
+// while it waits between orders for the next one.
+function assistModeOn(?string $station = null): bool {
+    if ($station === null) $station = currentStationId();
+    $stmt = getDB()->prepare("SELECT 1 FROM assist_mode WHERE station=?");
+    $stmt->execute([$station]);
+    return (bool)$stmt->fetchColumn();
+}
+
+// Switch this station's assist mode on or off. On is idempotent — re-joining
+// keeps the original `since`, which is when the operator chose to start
+// helping rather than when the current order happened to come along.
+function setAssistMode(bool $on): void {
+    $db = getDB();
+    if (!$on) {
+        $db->prepare("DELETE FROM assist_mode WHERE station=?")
+           ->execute([currentStationId()]);
+        return;
+    }
+    $db->prepare(
+        "INSERT INTO assist_mode (station, since) VALUES (?, ?)
+         ON CONFLICT(station) DO NOTHING"
+    )->execute([currentStationId(), now()]);
+}
+
+// The automatic half of sticky assist: if this station is in assist mode and
+// attached to nothing, join the order it could help. Returns the order id it
+// joined, or null when it joined nothing — the mode is off, the station is
+// already on an order, no other station has one open, or *several* do. That
+// last case is left to the operator via the Assist card, for the same reason
+// 'assist_auto' refuses to guess: choosing wrong puts one household's
+// groceries on another household's order.
+//
+// Safe (and cheap) to call on every poll and page load: a no-op unless the
+// station is genuinely between orders with the mode on.
+function autoJoinNextAssist(): ?int {
+    if (!assistModeOn())    return null;
+    if (currentOpenOrder()) return null;   // owns an order — not free to help
+    if (assistedOrder())    return null;   // already helping one
+    $open = assistableOrders();
+    if (count($open) !== 1) return null;
+    $orderId = (int)$open[0]['id'];
+    return joinOrderAssist($orderId) === null ? $orderId : null;
+}
+
+// ── Per-station preferences ──────────────────────────────────────────
+// Switches that belong to a device rather than to the pantry, kept in
+// station_prefs so they survive the order, the assist, and the browser session.
+// No row means every default, so a station that never touches a switch never
+// writes one.
+
+// Should this station sound the scan tone as it records items while assisting?
+// Read only by the station itself — the beep is local, on the assisting
+// station's own speaker. Defaults to on.
+function stationScanBeep(?string $station = null): bool {
+    if ($station === null) $station = currentStationId();
+    $stmt = getDB()->prepare("SELECT scan_beep FROM station_prefs WHERE station=?");
+    $stmt->execute([$station]);
+    $v = $stmt->fetchColumn();
+    return $v === false ? true : ((int)$v === 1);   // no row — default on
+}
+
+function setStationScanBeep(bool $on): void {
+    getDB()->prepare(
+        "INSERT INTO station_prefs (station, scan_beep, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(station) DO UPDATE SET scan_beep = excluded.scan_beep,
+                                            updated_at = excluded.updated_at"
+    )->execute([currentStationId(), $on ? 1 : 0, now()]);
+}
+
+
 // An order's scans in ascending id order, shaped for the scan page's table:
 // the raw columns plus a server-formatted time (scanned_at is 'Y-m-d H:i:s',
 // which JS Date parsing handles inconsistently across engines) and the short
