@@ -72,6 +72,10 @@ function fpThrottleDB(): ?PDO {
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
         $pdo->exec('PRAGMA busy_timeout = 5000');
+        // Matches db.php — per-connection, and this handle writes on every
+        // failed login. Journal mode is left alone: it is already WAL in the
+        // file header, and this connection must never try to convert it.
+        $pdo->exec('PRAGMA synchronous = NORMAL');
         $pdo->exec("CREATE TABLE IF NOT EXISTS login_throttle (
             ip           TEXT PRIMARY KEY,
             fails        INTEGER NOT NULL DEFAULT 0,

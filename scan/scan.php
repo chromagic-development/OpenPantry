@@ -735,6 +735,7 @@ const MY_STATION = <?= json_encode($myStation) ?>;
 //   errorBeep()  — harsh descending buzz: unknown UPC needing a manual name.
 //   ignoreBeep() — rising swoop: unknown UPC skipped, nothing to do.
 //   alarmBeep()  — repeating two-tone siren: a recalled item was scanned.
+//   readyBeep()  — soft short tick: platform clear, take the next item.
 let audioCtx = null;
 
 // Chrome will not let an AudioContext start until the page has seen a real
@@ -784,6 +785,22 @@ function errorBeep() {
 // and not a save, so it can't share a sound with either.
 function removeBeep() {
   playTones([[0, 1175, 0.12], [0.14, 880, 0.18]]);
+}
+// One short tick: the platform is clear and the station will take the next item.
+// It sounds once per weighed item, so it stays a single note rather than a
+// phrase — punctuation, not an announcement.
+//
+// The gain looks high next to alertBeep()'s 0.30 and is not: three things stack
+// up to make the same number quieter here. A triangle wave carries about half a
+// square's RMS at equal peak, and almost none of its upper harmonics, which is
+// the band the ear is most sensitive to. A 0.10s note also reads quieter than a
+// 0.18s one, because hearing integrates energy over roughly the first 200ms.
+// 0.22 and 70ms together landed this a good 10dB under the sound that opens the
+// weight window — inaudible across a room. 0.50 and 0.10s puts it back in
+// range while keeping the rounder timbre that tells it apart from every other
+// sound here, all of which are square or sawtooth.
+function readyBeep() {
+  playTones([[0, 523, 0.10, 'triangle']], 0.50);
 }
 // Rising glide — the arcade "jump" swoop. Deliberately unlike errorBeep()'s
 // descending buzz: nothing went wrong and nothing is owed, the operator can
@@ -1464,6 +1481,18 @@ const SCALE_IDLE_MS = 180000;
 // in seconds — nobody opening the page should sit through the three-minute idle
 // timeout to be told the scale isn't on.
 const SCALE_STARTUP_MS = 12000;
+// Rearming is passive: it waits for an input report that shows the platform
+// empty. On a scale that frames once a second, that means the platform has to
+// stay empty across a frame boundary — and an operator who lifts one item and
+// sets the next one down inside that second never produces an empty frame at
+// all. The clearance happened between two reports and was never seen, so the
+// station goes on waiting for one that has already been and gone.
+//
+// So while disarmed, ask instead of waiting. HID POS scales carry the same five
+// bytes as a feature report, and reading it is a round trip on demand rather
+// than a wait for the next scheduled frame, which brings the clear-the-platform
+// pause down from about a second to about a tenth of one.
+const HID_POLL_MS = 100;
 
 const hid = {
   device:       null,
@@ -1481,6 +1510,11 @@ const hid = {
   connectedAt:  0,      // when this device was opened
   everRead:     false,  // a usable weight has arrived since connecting
   motionStreak: 0,      // consecutive non-stable reports
+  capturedLbs:  null,   // weight that disarmed the platform, for swap detection
+  readyOwed:    false,  // a capture happened; the ready tick is owed once clear
+  reportId:     0,      // report ID the scale streams on, for the clearance poll
+  polling:      false,  // a clearance poll is in flight
+  pollBroken:   false,  // this scale answers no feature reads — stop asking
 };
 
 
@@ -1550,9 +1584,23 @@ function scaleHeartbeat(lbs) {
   }
 }
 
+// The platform is clear — take the next item. Shared with the clearance poll
+// below, which reaches this same conclusion over the feature-report channel
+// instead of waiting for the next input frame.
+function rearmScale() {
+  hid.armed        = true;
+  hid.motionStreak = 0;
+  hid.capturedLbs  = null;
+  resetSettle();
+  setScaleStatusLive('⚖ Scale ready', 'ok');
+}
+
 async function onScaleReport(e) {
   const r = parseHidScaleReport(e.data);
   if (!r) return;
+  // Remembered for the clearance poll: the same report ID carries the scale's
+  // feature report, and nothing else tells us what that ID is.
+  hid.reportId = e.reportId;
   scaleHeartbeat(r.lbs);
 
   // A scale that has powered itself down keeps the USB connection up and emits
@@ -1594,10 +1642,7 @@ async function onScaleReport(e) {
   // "clear the platform", and it is why the wedge path's timed echo window is
   // not needed here.
   if (r.status === HID_ST_ZERO || r.lbs < HID_MIN_CAPTURE_LBS) {
-    hid.armed = true;
-    hid.motionStreak = 0;
-    resetSettle();
-    setScaleStatusLive('⚖ Scale ready', 'ok');
+    rearmScale();
     return;
   }
   if (r.status !== HID_ST_STABLE) {
@@ -1619,7 +1664,24 @@ async function onScaleReport(e) {
     // above. Once the pending entry is resolved, say what has to happen next
     // instead of leaving a stale message on screen with the platform loaded.
     if (state.pendingWeight === null) {
-      setScaleStatusLive('⚖ Clear the platform to weigh the next item.', '');
+      // Which of two things is sitting there decides what to say. A weight
+      // matching the one that disarmed us is the same item, not yet lifted, so
+      // the message is only a reminder. A *different* weight means a new item
+      // landed before the scale rearmed — the clearance this station waits for
+      // happened between two reports and was never seen — and that has to be
+      // said plainly, because the item sitting there is not being weighed and
+      // nothing will change until it is lifted off and set down again.
+      //
+      // Said, not sounded. readyBeep() is what paces the operator, and an item
+      // put on early means they were not working to it; a second sound scolding
+      // them for that buys nothing this message does not already say, and every
+      // sound added here is one more to tell apart across a noisy room.
+      const swapped = hid.capturedLbs === null
+                   || Math.abs(r.lbs - hid.capturedLbs) > HID_SETTLE_TOL_LBS;
+      setScaleStatusLive(
+        swapped ? '⚠ Put on too soon — lift the item off and set it down again.'
+                : '⚖ Clear the platform to weigh the next item.',
+        swapped ? 'warn' : '');
     }
     return;
   }
@@ -1681,11 +1743,15 @@ async function onScaleReport(e) {
   // operator the instant they finish the first is how one mistake becomes two.
   // Weighing it for real means taking it off and putting it back on.
   if (state.pendingWeight !== null) {
-    hid.armed = false;
+    hid.armed       = false;
+    hid.capturedLbs = r.lbs;
+    hid.readyOwed   = true;
     setScaleStatusLive('⚠ No PLU entered.', 'warn');
     return;
   }
-  hid.armed = false;
+  hid.armed       = false;
+  hid.capturedLbs = r.lbs;
+  hid.readyOwed   = true;
   resetSettle();
   setScaleStatus('⚖ Total weight at ' + r.lbs.toFixed(2) + ' lb.', 'ok');
   await acceptScaleWeight(r.lbs, { echoCheck: false });
@@ -1711,7 +1777,89 @@ setInterval(() => {
   setScaleStatus('⚠ Make sure scale is on.', 'warn');
 }, 5000);
 
-async function openScale(device) {
+// Ask whether the platform has been cleared yet, rather than waiting for the
+// scale to mention it. Only while disarmed: while it is armed there is nothing
+// here the input stream is not already saying, and this costs a USB round trip
+// ten times a second.
+setInterval(async () => {
+  if (!hid.device) return;
+  // "Take the next item." The platform disarmed for a capture and has since come
+  // back to clear with its entry finished — the one moment the operator is
+  // actually waiting on, and the reason they were watching this strip at all.
+  //
+  // Edge-triggered through readyOwed rather than fired off `armed`, because the
+  // input path rearms on *every* empty frame: a scale sitting idle between
+  // customers would otherwise tick once a second forever. And `armed` cannot
+  // flicker into a double tick, because the only thing that clears it is a
+  // capture, which takes a full settle to reach.
+  //
+  // Both orderings land here. Lift the item and then enter the PLU, or enter
+  // the PLU and then lift the item — whichever comes second completes the pair,
+  // and neither alone means the station can take another item. Ticking on the
+  // lift alone would invite exactly the mistake this is meant to prevent: a new
+  // item set down while the last one is still waiting to be identified, whose
+  // reading is then thrown away with a buzz.
+  if (hid.readyOwed && hid.armed && state.pendingWeight === null) {
+    hid.readyOwed = false;
+    readyBeep();
+  }
+  // The clearance poll proper, which has nothing to learn while armed.
+  if (hid.armed || hid.pollBroken || hid.polling) return;
+  if (!hid.reportId) return;   // nothing has streamed yet — no ID to ask on
+  hid.polling = true;
+  let raw = null;
+  try {
+    raw = await hid.device.receiveFeatureReport(hid.reportId);
+  } catch (err) {
+    // Plenty of scales in this class expose no readable feature report. That is
+    // not worth reporting — the station simply falls back to the passive rearm
+    // it has always used — but asking every tenth of a second for the rest of
+    // the shift would be.
+    hid.pollBroken = true;
+  }
+  hid.polling = false;
+  // A feature report carries its ID as byte 0, where an input report's travels
+  // on the event instead, so drop it and the same parser applies.
+  if (!raw || raw.byteLength < 6) return;
+  if (hid.armed) return;   // an input frame beat us to it while we awaited
+  const r = parseHidScaleReport(
+    new DataView(raw.buffer, raw.byteOffset + 1, raw.byteLength - 1));
+  if (!r) return;
+  // Deliberately narrow: this answers one question — is the platform clear —
+  // and nothing else. Faults, wrong units, settling and capture all stay with
+  // the input stream, which sees every frame the scale sends rather than
+  // whichever one this snapshot happened to catch. A re-zero or under-zero
+  // status is excluded for the same reason it is on the input path: it is a
+  // reading to complain about, not a clearance to act on.
+  const clear = r.status === HID_ST_ZERO
+             || ((r.status === HID_ST_MOTION || r.status === HID_ST_STABLE)
+                 && r.lbs !== null && r.lbs < HID_MIN_CAPTURE_LBS);
+  if (clear) rearmScale();
+}, HID_POLL_MS);
+
+// Every path that can open the scale funnels through here, and they overlap:
+// the load-time auto-connect, its two retry timers, the visibilitychange
+// handler, a 'connect' event and the Connect button can all be in flight at
+// once. Unserialized, two of them clear the `hid.device` check while the first
+// is still awaiting getDevices(), both reach device.open(), and the loser's
+// InvalidStateError paints "Could not open the scale" over a scale that just
+// connected perfectly well. One chain, so they queue instead of collide.
+let scaleOpenChain = Promise.resolve();
+function openScale(device, opportunistic) {
+  const run = async () => {
+    // Re-checked here, not at the call site: a queued caller may have been
+    // waiting behind the one that actually connected. The Connect button passes
+    // opportunistic=false, because an operator picking a device from the picker
+    // means switch to it even if something is already open.
+    if (opportunistic && hid.device) return true;
+    return await openScaleNow(device);
+  };
+  const next = scaleOpenChain.then(run, run);
+  scaleOpenChain = next.catch(() => {});
+  return next;
+}
+
+async function openScaleNow(device) {
   try {
     if (!device.opened) await device.open();
   } catch (err) {
@@ -1727,6 +1875,14 @@ async function openScale(device) {
   hid.armed        = true;
   hid.connectedAt  = Date.now();
   hid.everRead     = false;
+  hid.capturedLbs  = null;
+  hid.readyOwed    = false;
+  // Cleared per device, not per page: the report ID and whether feature reads
+  // work are facts about *this* scale, and carrying either over from the one
+  // that was unplugged would poll the new one on the wrong ID, or not at all.
+  hid.reportId     = 0;
+  hid.polling      = false;
+  hid.pollBroken   = false;
   resetSettle();
   device.addEventListener('inputreport', onScaleReport);
   // Not "ready" yet — nothing has been heard from it. Claiming ready before a
@@ -1747,12 +1903,56 @@ async function connectScale() {
     return;
   }
   if (!devices || !devices.length) return;   // operator dismissed the picker
-  await openScale(devices[0]);
+  await openScale(devices[0], false);
 }
 
+// Walk child collections too, not just the top level: plenty of devices hang
+// the scale usage off a nested collection, and a top-level-only test then
+// fails to recognize a scale the operator has already granted — which shows up
+// as being asked to pick it from the list on every single visit.
 function isScaleDevice(d) {
-  return d.collections
-      && d.collections.some(c => c.usagePage === HID_SCALE_USAGE_PAGE);
+  if (!d || !d.collections) return false;
+  const hit = (cols) => (cols || []).some(
+    c => c.usagePage === HID_SCALE_USAGE_PAGE || hit(c.children));
+  return hit(d.collections);
+}
+
+// A device we cannot classify either way: some platforms report an empty
+// collections list until the device has been opened, and refusing those would
+// strand a scale the operator has already picked. A device that *does* publish
+// collections with no scale usage among them is not the same thing — that is a
+// positive answer of "not the weight interface", and it gets no benefit of the
+// doubt.
+function couldBeScale(d) {
+  if (!d) return false;
+  if (isScaleDevice(d)) return true;
+  return !d.collections || d.collections.length === 0;
+}
+
+// Chrome splits some scales into one HIDDevice per interface, and getDevices()
+// returns every entry this origin was granted — so "granted" does not mean "the
+// interface that reports weight". Take a positive usage-page match first and
+// settle for an unclassifiable device only when nothing matched. Opening the
+// wrong interface of the right scale looks exactly like a scale that is
+// switched off, except that openScale() has already hidden the Connect button
+// and set hid.device, so nothing left on the page can recover from it.
+function pickGrantedScale(devices) {
+  return devices.find(isScaleDevice) || devices.find(couldBeScale) || null;
+}
+
+async function autoConnectScale() {
+  if (hid.device) return true;
+  let granted;
+  try {
+    granted = await navigator.hid.getDevices();
+  } catch (err) {
+    setScaleStatus('⚠ Could not read the saved scale permission: '
+      + err.message, 'warn');
+    return false;
+  }
+  const scale = pickGrantedScale(granted);
+  if (!scale) return false;
+  return await openScale(scale, true);
 }
 
 // A device the operator has already granted comes back through getDevices()
@@ -1771,16 +1971,28 @@ async function initScale() {
     setScaleStatus('⚠ Scale disconnected — check its USB cable and power.', 'warn');
     $('scaleConnect').style.display = '';
   });
+  // A granted device appearing on USB is the scale being switched on or plugged
+  // in — but Chrome fires one event per HIDDevice, so a multi-interface scale
+  // announces its non-weight interfaces here too, and whichever arrives first
+  // wins. Opening the wrong one is unrecoverable (see pickGrantedScale), so the
+  // usage-page test has to happen on this path as well, not just on the
+  // getDevices() one.
   navigator.hid.addEventListener('connect', async (e) => {
-    if (hid.device || !isScaleDevice(e.device)) return;
-    await openScale(e.device);
+    if (hid.device || !couldBeScale(e.device)) return;
+    await openScale(e.device, true);
   });
 
-  try {
-    const granted = await navigator.hid.getDevices();
-    const scale = granted.find(isScaleDevice);
-    if (scale) await openScale(scale);
-  } catch (err) { /* no grant yet — the Connect button covers it */ }
+  // Try now, then twice more. getDevices() can populate a beat after load on
+  // some platforms, and a scale switched on while the page is still opening
+  // arrives later still. Each call is a no-op once connected.
+  await autoConnectScale();
+  setTimeout(autoConnectScale, 1500);
+  setTimeout(autoConnectScale, 5000);
+
+  // Returning to a backgrounded kiosk tab shouldn't need a click either.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) autoConnectScale();
+  });
 }
 initScale();
 

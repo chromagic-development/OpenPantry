@@ -92,11 +92,13 @@ $z         = (float)setting('safety_z', '1.65');
 //     doesn't inflate Avg Daily / par levels for regular pantry demand.
 //   * Produce Only (default off): recommendations list only produce-kind
 //     items, and the Generate Email button (supplier produce order)
-//     becomes available. Rows start with their Restock box checked, except
-//     where the Order Request is 0 — there is nothing to order on those.
+//     becomes available.
 //   * Purchased Only (default off): recommendations list only items that
 //     have a non-zero Purchased value on the Inventory page (i.e. some of
 //     their restocked amount was purchased rather than donated).
+// Independently of the filters, a row starts with its Restock box checked when
+// the item is one of the Reorder reminders and has a non-zero Order Request —
+// the alerts are what the page is asking be ordered, so they arrive ticked.
 if (isset($_GET['submitted'])) {
     $ignoreStock   = isset($_GET['ignore_stock']);
     $ignoreEvents  = isset($_GET['ignore_events']);
@@ -159,11 +161,39 @@ foreach ($rows as $r) {
 
 // Reorder reminders: one HTML line per triggered alert, same wording the
 // cron mailer uses (built from the structured entries report_lib returns).
+$alertEntries = op_report_alerts($db, $rows);
+// Grouped by unit, biggest order first within each group. The list is read as a
+// shopping priority, so the line that needs the most food should lead — but 176
+// each and 219.6 lb are not comparable quantities, and interleaving them reads
+// as a ranking that isn't one. So the units are kept apart, and each group is
+// ordered by its own largest request, which puts the single biggest line at the
+// top of the list as before and keeps its unit-mates under it. Sorted on the raw
+// request rather than the rounded text so two similar figures still order
+// correctly.
+$unitRank = [];
+foreach ($alertEntries as $a) {
+    $u = $a['unit'];
+    $unitRank[$u] = max($unitRank[$u] ?? 0.0, (float)$a['order']);
+}
+usort($alertEntries, function ($x, $y) use ($unitRank) {
+    if ($x['unit'] !== $y['unit']) {
+        // Tie between two units (identical largest requests) falls back to the
+        // unit name, so the order is stable rather than whatever usort picks.
+        return ($unitRank[$y['unit']] <=> $unitRank[$x['unit']])
+            ?: strcmp($x['unit'], $y['unit']);
+    }
+    return ((float)$y['order']) <=> ((float)$x['order']);
+});
+
 $alerts = [];
-foreach (op_report_alerts($db, $rows) as $a) {
+// Names of the alerted items that actually have something to order. The Restock
+// column starts ticked on exactly these rows (see the checkbox below).
+$alertOrderNames = [];
+foreach ($alertEntries as $a) {
     $alerts[] = "<strong>" . htmlspecialchars($a['name']) . "</strong>: only "
         . $a['days_text'] . " days of stock — order at least "
         . $a['order_text'] . " " . htmlspecialchars($a['unit']);
+    if ((float)$a['order'] > 0) $alertOrderNames[$a['name']] = true;
 }
 
 renderHead('Order Now Report');
@@ -279,7 +309,7 @@ renderNav('report');
             Purchased Only
           </label>
           <label class="rep-toggle"
-                 title="List only produce items; Restock boxes start checked on rows with an Order Request">
+                 title="List only produce items">
             <input type="checkbox" name="produce_only" value="1" <?= $produceOnly ? 'checked' : '' ?>>
             Produce Only
           </label>
@@ -517,13 +547,14 @@ renderNav('report');
                    data-has-crates="<?= !empty($r['has_crates']) ? '1' : '0' ?>"
                    data-lb-per-each="<?= htmlspecialchars((string)(float)$r['lb_per_each']) ?>"
                    data-crates-per-case="<?= htmlspecialchars((string)(float)$r['crates_per_case']) ?>"
-                   <?php /* Produce Only pre-checks the rows so a produce order
-                            can be sent without ticking each line, but only
-                            where there is something to order: a row whose
-                            Order Request is 0 (blank) contributes nothing to
-                            the email or Restock Now, so a tick there is just
-                            one more box to clear. */ ?>
-                   <?= ($produceOnly && $reqValue !== '') ? 'checked' : '' ?>>
+                   <?php /* Rows named in the Reorder reminders banner start
+                            ticked, so the order the alerts are asking for can
+                            be sent without hunting for those lines in the
+                            table. Only where there is something to order: a
+                            row whose Order Request is 0 (blank) contributes
+                            nothing to the email or Restock Now, so a tick
+                            there is just one more box to clear. */ ?>
+                   <?= (isset($alertOrderNames[$r['name']]) && $reqValue !== '') ? 'checked' : '' ?>>
           </td>
           <td><strong><?= htmlspecialchars($r['name']) ?></strong><?php
               // ° marks rows using the trailing-average fallback (too little
@@ -711,7 +742,7 @@ function toggleAllRestock(master) {
 // Keep the header box honest about the column under it: checked when every
 // visible row is, indeterminate on a mixed set, clear when none are. Called
 // after anything that ticks a box or changes which rows are visible — including
-// the page-load pass, since Produce Only ships rows pre-checked.
+// the page-load pass, since alerted rows ship pre-checked.
 function syncRestockMaster() {
   var master = document.getElementById('restockAll');
   if (!master) return;

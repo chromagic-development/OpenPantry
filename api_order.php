@@ -151,7 +151,24 @@ if ($action === 'end') {
     // a helper station can never close the order it is only assisting.
     $open = currentOpenOrder();
     if (!$open) jsonOut(['ok' => false, 'error' => assistOnlyError('end')], 400);
-    $endedAt = endOrderById((int)$open['id']);
+    // endOrderById() rolls back and rethrows rather than leaving a closed order
+    // half-deducted. Answer that as JSON the page can show: an uncaught throw
+    // returns a 500 whose body isn't JSON, so postJson() rejects and the End
+    // button appears to do nothing at all. Only contention gets "try again" —
+    // see isDbBusyError(); anything else would fail the same way forever.
+    try {
+        $endedAt = endOrderById((int)$open['id']);
+    } catch (\Throwable $e) {
+        error_log('OpenPantry: end order #' . (int)$open['id'] . ' failed — ' . $e->getMessage());
+        if (isDbBusyError($e)) {
+            jsonOut(['ok' => false,
+                     'error' => 'The database was busy — nothing was changed. Tap End again.'], 503);
+        }
+        jsonOut(['ok' => false,
+                 'error' => 'Order #' . (int)$open['id'] . ' could not be ended and nothing was '
+                          . 'changed. Trying again will not help — please tell an administrator.'],
+                500);
+    }
     jsonOut(['ok' => true, 'order_id' => (int)$open['id'], 'ended_at' => $endedAt]);
 }
 
@@ -160,7 +177,20 @@ if ($action === 'cancel') {
     // discards every scan, including the helper's.
     $open = currentOpenOrder();
     if (!$open) jsonOut(['ok' => false, 'error' => assistOnlyError('cancel')], 400);
-    $at = cancelOrderById((int)$open['id']);
+    try {
+        $at = cancelOrderById((int)$open['id']);
+    } catch (\Throwable $e) {
+        error_log('OpenPantry: cancel order #' . (int)$open['id'] . ' failed — ' . $e->getMessage());
+        if (isDbBusyError($e)) {
+            jsonOut(['ok' => false,
+                     'error' => 'The database was busy — nothing was changed. Tap Cancel again.'],
+                    503);
+        }
+        jsonOut(['ok' => false,
+                 'error' => 'Order #' . (int)$open['id'] . ' could not be cancelled and nothing '
+                          . 'was changed. Trying again will not help — please tell an '
+                          . 'administrator.'], 500);
+    }
     jsonOut(['ok' => true, 'order_id' => (int)$open['id'], 'cancelled_at' => $at]);
 }
 
@@ -187,6 +217,12 @@ if ($action === 'remote_end' || $action === 'remote_cancel') {
     $stmt = $db->prepare("SELECT * FROM orders WHERE id=?");
     $stmt->execute([$orderId]);
     $target = $stmt->fetch();
+    // fetch() stops at the first row, so the cursor stays open and holds a read
+    // transaction on this connection. endOrderById() writes on that same
+    // connection a few lines down, and a write that has to upgrade a live read
+    // snapshot is refused outright when another station has committed in the
+    // meantime — SQLITE_BUSY with the busy handler skipped. Let the read go.
+    $stmt->closeCursor();
     // The Assist card was drawn from a poll up to 2.5s ago, and the owner may
     // have come back and closed the order in between.
     if (!$target) {
@@ -196,7 +232,20 @@ if ($action === 'remote_end' || $action === 'remote_cancel') {
         jsonOut(['ok' => false, 'error' => 'Order #' . $orderId . ' is already closed.'], 409);
     }
     $ended = ($action === 'remote_end');
-    $at = $ended ? endOrderById($orderId) : cancelOrderById($orderId);
+    try {
+        $at = $ended ? endOrderById($orderId) : cancelOrderById($orderId);
+    } catch (\Throwable $e) {
+        error_log('OpenPantry: ' . $action . ' order #' . $orderId . ' failed — ' . $e->getMessage());
+        if (isDbBusyError($e)) {
+            jsonOut(['ok' => false,
+                     'error' => 'The database was busy — order #' . $orderId
+                              . ' was not changed. Try again.'], 503);
+        }
+        jsonOut(['ok' => false,
+                 'error' => 'Order #' . $orderId . ' could not be '
+                          . ($ended ? 'ended' : 'cancelled') . ' and was not changed. Trying '
+                          . 'again will not help — please tell an administrator.'], 500);
+    }
     // The station's own state, so the page repaints from one response: the
     // closed order drops out of the Assist card, and a station left in assist
     // mode picks up whatever real order is open now.

@@ -144,6 +144,10 @@ function openPicklistDb(): PDO {
     if (strtolower((string)$db->query("PRAGMA journal_mode")->fetchColumn()) !== 'wal') {
         $db->exec("PRAGMA journal_mode = WAL");
     }
+    // Per-connection, never persistent — see the matching note in db.php. NORMAL
+    // is the recommended WAL setting: crash-safe, only a power cut can lose the
+    // most recent commits.
+    $db->exec("PRAGMA synchronous = NORMAL");
     $db->exec("PRAGMA foreign_keys = ON");
 
     // Migrate: add unavailable column if it doesn't exist yet
@@ -184,6 +188,15 @@ function openPicklistDb(): PDO {
         active INTEGER DEFAULT 1,
         sort_order INTEGER DEFAULT 0
     )");
+
+    // Every order_items lookup is by order_id — the kitchen dashboard's 5-second
+    // poll alone runs one COUNT per pending order plus a LEFT JOIN across the
+    // whole table — and without an index SQLite rebuilds a throwaway "AUTOMATIC
+    // COVERING INDEX" over every row on each one. Completed orders are never
+    // purged, so that scan grows for the life of the install: measured at 64ms
+    // per poll over 32k item rows and 221ms over 95k, against 3ms once this
+    // index exists.
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id)");
 
     // Menucounter-local settings (key/value). Currently just `client_notes`,
     // the optional "Special Notes to Clients" line shown on the order form.

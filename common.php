@@ -431,35 +431,84 @@ function clearOrderAssists(int $orderId): void {
 // some other station run exactly the same code. Neither function decides *who*
 // may do this, and both assume the order is open — the endpoint checks both.
 
+// Was this failure the database being busy, or something that will fail again?
+//
+// It matters because the two need opposite advice. Contention clears on its own
+// and "tap End again" is honest; a constraint violation, a missing column or a
+// bug in this file reproduces identically on every retry, and telling a
+// volunteer to keep tapping turns a one-off error into a household whose order
+// can never be closed and nobody who knows to call for help.
+//
+// SQLITE_BUSY is 5 and SQLITE_LOCKED is 6, reported in errorInfo[1] by the
+// SQLite driver. errorInfo is empty for a few PDOException paths (notably one
+// thrown from beginTransaction()), so the message text is checked as well.
+function isDbBusyError(\Throwable $e): bool {
+    if (!($e instanceof \PDOException)) return false;
+    $code = (int)($e->errorInfo[1] ?? 0);
+    if ($code === 5 || $code === 6) return true;
+    return stripos($e->getMessage(), 'is locked') !== false;
+}
+
 // Close an order and deduct what went out the door from inventory. Returns the
 // ended_at it wrote, so the caller reports the timestamp actually stored.
+//
+// One transaction, for two separate reasons. Atomicity is the obvious one: a
+// median order touches fifteen inventory rows, and as fifteen autocommit writes
+// a PHP timeout partway through left the order closed with only some of its
+// items deducted — a silent shortfall nothing retries and only a physical count
+// finds. The subtler one is locking. Each `SELECT 1 FROM inventory` below left
+// a read cursor open across the UPDATE that follows it, so the write had to
+// upgrade a read snapshot; SQLite refuses that outright the moment another
+// station has committed since the snapshot was taken, and returns SQLITE_BUSY
+// *without consulting the busy handler* — so the 5s busy_timeout set in db.php
+// never applied and the close failed instantly. Taking the write lock up front
+// (the UPDATE below is the transaction's first statement, so BEGIN DEFERRED
+// acquires it immediately) removes the upgrade entirely, and every station that
+// arrives mid-close now waits its turn instead of erroring out.
 function endOrderById(int $orderId): string {
     $db = getDB();
     $endedAt = now();
-    $db->prepare("UPDATE orders SET status='closed', ended_at=? WHERE id=?")
-       ->execute([$endedAt, $orderId]);
-    // Release the helpers: their next sync sees no order and drops to idle.
-    clearOrderAssists($orderId);
+    $db->beginTransaction();
+    try {
+        $db->prepare("UPDATE orders SET status='closed', ended_at=? WHERE id=?")
+           ->execute([$endedAt, $orderId]);
+        // Release the helpers: their next sync sees no order and drops to idle.
+        clearOrderAssists($orderId);
 
-    // Decrement inventory by what was scanned in this order so the inventory
-    // count reflects what just left the building.
-    $items = $db->prepare(
-        "SELECT generic_name, SUM(quantity) qty, SUM(COALESCE(weight_lbs,0)) wt, kind
-         FROM scans WHERE order_id=? GROUP BY generic_name"
-    );
-    $items->execute([$orderId]);
-    $exists = $db->prepare('SELECT 1 FROM inventory WHERE generic_name=?');
-    $update = $db->prepare(
-        "UPDATE inventory SET count = MAX(0, count - ?), updated_at=? WHERE generic_name=?"
-    );
-    foreach ($items->fetchAll() as $row) {
-        $delta = ($row['kind'] === 'produce') ? (float)$row['wt'] : (float)$row['qty'];
-        // Only decrement existing inventory rows. Closing an order shouldn't
-        // imply "the prior count was zero" for an item never counted.
-        $exists->execute([$row['generic_name']]);
-        if ($exists->fetchColumn()) {
-            $update->execute([$delta, $endedAt, $row['generic_name']]);
+        // Decrement inventory by what was scanned in this order so the inventory
+        // count reflects what just left the building.
+        $items = $db->prepare(
+            "SELECT generic_name, SUM(quantity) qty, SUM(COALESCE(weight_lbs,0)) wt, kind
+             FROM scans WHERE order_id=? GROUP BY generic_name"
+        );
+        $items->execute([$orderId]);
+        $rows = $items->fetchAll();
+        $items->closeCursor();
+        $exists = $db->prepare('SELECT 1 FROM inventory WHERE generic_name=?');
+        $update = $db->prepare(
+            "UPDATE inventory SET count = MAX(0, count - ?), updated_at=? WHERE generic_name=?"
+        );
+        foreach ($rows as $row) {
+            $delta = ($row['kind'] === 'produce') ? (float)$row['wt'] : (float)$row['qty'];
+            // Only decrement existing inventory rows. Closing an order shouldn't
+            // imply "the prior count was zero" for an item never counted.
+            $exists->execute([$row['generic_name']]);
+            $have = $exists->fetchColumn();
+            // fetchColumn() stops at the first row and leaves the statement's
+            // cursor open. Harmless inside the transaction, but a reused handle
+            // holding a cursor across a write is exactly the shape that made
+            // this function fail, so close it rather than leave the trap set.
+            $exists->closeCursor();
+            if ($have) {
+                $update->execute([$delta, $endedAt, $row['generic_name']]);
+            }
         }
+        $db->commit();
+    } catch (\Throwable $e) {
+        // Nothing deducted and the order still open beats a half-deducted close:
+        // the station can simply press End again.
+        if ($db->inTransaction()) $db->rollBack();
+        throw $e;
     }
     return $endedAt;
 }
@@ -474,14 +523,21 @@ function endOrderById(int $orderId): string {
 function cancelOrderById(int $orderId): string {
     $db = getDB();
     $db->beginTransaction();
-    $db->prepare("DELETE FROM scans WHERE order_id=?")->execute([$orderId]);
-    // Before the order row, so the order_assists foreign key still resolves.
-    $db->prepare("DELETE FROM order_assists WHERE order_id=?")->execute([$orderId]);
-    $db->prepare("DELETE FROM orders WHERE id=?")->execute([$orderId]);
-    $db->exec(
-        "UPDATE sqlite_sequence SET seq = (SELECT IFNULL(MAX(id), 0) FROM orders) WHERE name='orders'"
-    );
-    $db->commit();
+    try {
+        $db->prepare("DELETE FROM scans WHERE order_id=?")->execute([$orderId]);
+        // Before the order row, so the order_assists foreign key still resolves.
+        $db->prepare("DELETE FROM order_assists WHERE order_id=?")->execute([$orderId]);
+        $db->prepare("DELETE FROM orders WHERE id=?")->execute([$orderId]);
+        $db->exec(
+            "UPDATE sqlite_sequence SET seq = (SELECT IFNULL(MAX(id), 0) FROM orders) WHERE name='orders'"
+        );
+        $db->commit();
+    } catch (\Throwable $e) {
+        // Same contract as endOrderById(): leave the order exactly as it was so
+        // the station can try again, rather than half-discarded.
+        if ($db->inTransaction()) $db->rollBack();
+        throw $e;
+    }
     return now();
 }
 

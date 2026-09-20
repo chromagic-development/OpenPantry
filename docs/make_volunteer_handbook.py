@@ -33,7 +33,7 @@ E += cover(
     subtitle="Volunteer Handbook",
     badge_text="FOR VOLUNTEERS",
     blurb="How to open and run the checkout and Menu Counter stations.",
-    revision="Revised August 2026 &nbsp;•&nbsp; Version 1.1")
+    revision="Revised September 2026 &nbsp;•&nbsp; Version 1.2")
 
 # ================================================================ welcome
 E.append(kicker("START HERE"))
@@ -53,7 +53,10 @@ E.append(warn("GOLDEN RULE",
     "If anything looks wrong — a frozen screen, a scanner that won't beep, a "
     "weight that won't save — <b>don't force it</b>. Note the order number if "
     "there is one and ask the administrator on duty. Nothing you tap here can "
-    "break the data."))
+    "break the data. <b>One exception:</b> if a red <b>Recalled Product</b> "
+    "window fills the screen and an alarm sounds, don't wait for anyone — take "
+    "that item out of the cart first, then carry on. See “When an item has "
+    "been recalled.”"))
 
 E.append(kicker("BEFORE YOU BEGIN"))
 E += h1("Getting on the stations")
@@ -105,6 +108,18 @@ E.append(step(3, "When they're done, tap <b>■ End Order</b>. The counts are "
 E.append(step(4, "Made a mistake? Tap the red <b>×</b> next to a line to remove "
                  "that scan, or tap <b>× Cancel Order</b> to throw the whole "
                  "order away."))
+# The two failures are worded to say opposite things on purpose (isDbBusyError
+# in common.php decides which). A volunteer who can't tell them apart either
+# gives up on an order that would close on the next tap, or taps End forever on
+# one that never will — so the difference has to be taught, not just printed.
+E.append(info("IF END OR CANCEL REFUSES",
+    "Very occasionally a pop-up says the order could not be ended or "
+    "cancelled. <b>Read which one it is.</b> If it says the database was "
+    "<b>busy</b>, another station was writing at that moment — just tap "
+    "<b>End Order</b> again and it will go through. If it says <b>trying "
+    "again will not help</b>, stop tapping and fetch the administrator. "
+    "Either way <b>nothing was changed</b>: the order is still open with every "
+    "scan on it, exactly as it was. A close that fails leaves no mess behind."))
 
 E.append(Paragraph("Adding an item by name (no barcode needed)", S["h3"]))
 E.append(body(
@@ -186,7 +201,13 @@ E.append(warn("CLEAR THE PLATFORM AFTER EVERY ITEM",
     "Whichever order you use, take the item off the scale and let it return to "
     "<b>0</b> before the next one. The scale only arms itself to send again "
     "once it has been cleared — a platform left loaded is the usual reason a "
-    "weight “doesn't come through.”"))
+    "weight “doesn't come through.” You don't have to watch the screen "
+    "for it. On a USB scale the station plays a <b>short soft tick</b> the "
+    "moment the platform is clear and the last item's code is in, and that "
+    "tick is your cue to set the next item down. It sounds once per item, and "
+    "it is quieter and rounder than every other sound here so it won't be "
+    "mistaken for one — work to it and you will never put an item on too "
+    "early."))
 E.append(info("IF SOMETHING LOOKS OFF WITH A WEIGHT",
     "The station protects you from the two mistakes that matter. If a "
     "cable-connected scale is set to <b>kilograms</b> (or grams or ounces) it "
@@ -225,6 +246,13 @@ E.append(bullet("<b>⚠ No PLU entered.</b> — you put another item on while th
 E.append(bullet("<b>⚖ Clear the platform to weigh the next item.</b> — "
                 "something is still sitting on the scale from the item you "
                 "just finished. Lift it off and the scale is ready again."))
+E.append(bullet("<b>⚠ Put on too soon — lift the item off and set it down "
+                "again.</b> — a new item landed on the platform before the "
+                "scale had finished with the last one, so the moment the "
+                "platform was clear went by unseen and <b>this item is not "
+                "being weighed</b>. Nothing is wrong with the item or the "
+                "scale, and waiting will not clear it: lift the item off, wait "
+                "for the tick, and set it back down."))
 E.append(bullet("<b>⚠ Make sure scale is on.</b> — see below."))
 E.append(bullet("<b>⚠ Over capacity</b> — the item is too heavy for this "
                 "scale. Take it off and weigh it in two batches."))
@@ -267,10 +295,75 @@ E.append(body(
     "“Canned Tuna”, not the brand) and tap <b>Save &amp; "
     "Record</b>. The app remembers it for next time. If you're unsure of the "
     "name, ask the administrator."))
+# Settings → Ignore Unknown Items. With it on there is no Identify window at
+# all, which reads as a failed scan to anyone taught to expect one — so say
+# plainly that the quiet version is a success, not a miss.
+E.append(info("OR THE STATION MAY NAME IT “UNIDENTIFIED” AND MOVE ON",
+    "Your pantry may have the station set to keep the line moving rather than "
+    "stop to ask. If so, an item it can't name <b>doesn't</b> open the "
+    "Identify box at all: it swoops once, records the item under the "
+    "placeholder name <b>Unidentified</b>, and shows a short note saying so. "
+    "<b>That is a finished scan, not a failed one</b> — the item is counted, "
+    "so bag it and carry on. Nothing is lost either: the name is only put off, "
+    "and it can be filled in later."))
+E.append(body(
+    "You may meet the same thing from the other side. Scan an item and the "
+    "Identify box sometimes opens already headed <b>Unidentified Item</b>, "
+    "which means this barcode was recorded without a name on some earlier "
+    "shift. Name it exactly as you would any other — and every past scan of "
+    "<i>that one barcode</i> is renamed along with it, which is why it is "
+    "worth doing whenever the box offers."))
 E.append(warn("KEEP THE CURSOR IN THE BOX",
     "The scanner types like a keyboard, so the barcode box must stay selected "
     "(it glows green). If scans stop registering, tap once inside that box and "
     "try again."))
+E.append(PageBreak())
+
+# ================================================================ recalls
+# The one screen in this book a volunteer must act on before doing anything
+# else, so it gets a page of its own rather than a callout inside another
+# section. The block is enforced in lookupBarcode() on the server, which is why
+# nothing is recorded, why re-scanning cannot get round it, and why it takes
+# hold on every station the instant the box is ticked.
+E.append(kicker("FOOD SAFETY"))
+E += h1("When an item has been recalled")
+E.append(Paragraph(
+    "A recall is the one moment at this station where you act first and ask "
+    "afterwards. If a product has been recalled — a contamination, an "
+    "undeclared allergen, a packaging fault — it must not leave the pantry, "
+    "and the station is built so that you cannot miss it.", S["lead"]))
+E.append(body(
+    "Scan a recalled item and everything stops. A <b>red window</b> fills the "
+    "screen, pulsing, headed <b>Recalled Product</b>, and an alarm sounds: a "
+    "two-tone siren about a second and a half long, deliberately longer and "
+    "more insistent than any other sound the station makes, so it carries even "
+    "if you are several feet away with your back to the screen. The window "
+    "names the item, so you know which package in the cart it means."))
+E.append(step(1, "<b>Take that item out of the cart now</b>, before anything "
+                 "else. Don't bag it, and don't hand it back to the shopper."))
+E.append(step(2, "Put it somewhere it can't be picked up again by mistake — "
+                 "away from the cart and away from the shelves."))
+E.append(step(3, "Tap <b>Item Removed</b> to close the window. The siren has "
+                 "already stopped on its own by then; that button is you "
+                 "confirming the package is out of the cart, which is why "
+                 "nothing else dismisses the window — not tapping the "
+                 "background, not pressing Escape. You land back in the "
+                 "barcode box and the rest of the order carries on as normal."))
+E.append(step(4, "Tell the administrator on duty before you finish your "
+                 "shift. There are very likely more of them on the shelves."))
+E.append(warn("IT WAS NOT RECORDED, AND SCANNING IT AGAIN WON'T HELP",
+    "Nothing about a recalled item goes onto the order — it isn't counted "
+    "and it isn't taken out of inventory, so there is nothing for you to "
+    "undo. The last-scan line says <b>not recorded</b> for exactly that "
+    "reason. Scanning it a second time simply raises the same alarm again: "
+    "the block isn't on your screen, it's on the server, so it holds on every "
+    "station at once. Only an administrator can lift a recall, from the "
+    "Lookup Tables page."))
+E.append(info("IF THE SHOPPER ASKS",
+    "You don't have to explain the recall, and please don't guess at the "
+    "reason. “This one has been recalled, so I can't let it go out — let "
+    "me find you another” is the whole of it. If they want to know more, "
+    "fetch the administrator."))
 E.append(PageBreak())
 
 # ================================================================ team scanning

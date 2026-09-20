@@ -499,33 +499,63 @@ usort($topPackaged, function ($a, $b) { return $b['each'] <=> $a['each']; });
 $topPackaged = array_slice($topPackaged, 0, 15);
 
 // ── Sourcing: donated vs purchased ────────────────────────────────────────
-// inventory.restocked_* are lifetime running totals maintained by the Restock
-// page — there is no per-batch log, so this mix is all-time and does NOT follow
-// the date filter. Labelled as such wherever it appears.
+// This card reports the food that actually went out the door in the selected
+// period — the same scanned pounds every other section counts — split by how
+// the pantry came by it. There is no per-scan record of where a particular can
+// came from, so each item's distributed pounds are apportioned by that item's
+// own lifetime Bought share from the Restock page (the "Bought" column on the
+// Inventory page):
 //
-// Same weighting rule as the rest of the page: a row already counted in lb is
-// taken as is, a row counted by the piece converts at its own Avg Wt, and only
-// a row with no Avg Wt falls back to $lbPerItem.
-$srcRow = $db->query("
-    SELECT
-        COALESCE(SUM(CASE WHEN unit = 'lb' THEN restocked_purchased ELSE 0 END), 0) AS p_lb,
-        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each > 0
-                          THEN restocked_purchased * lb_per_each ELSE 0 END), 0)    AS p_wt,
-        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each <= 0
-                          THEN restocked_purchased ELSE 0 END), 0)                  AS p_each,
-        COALESCE(SUM(CASE WHEN unit = 'lb' THEN restocked_donated ELSE 0 END), 0)   AS d_lb,
-        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each > 0
-                          THEN restocked_donated * lb_per_each ELSE 0 END), 0)      AS d_wt,
-        COALESCE(SUM(CASE WHEN unit <> 'lb' AND lb_per_each <= 0
-                          THEN restocked_donated ELSE 0 END), 0)                    AS d_each
-    FROM inventory
-")->fetch(PDO::FETCH_ASSOC) ?: [];
-$purchasedLbs = (float)($srcRow['p_lb'] ?? 0) + (float)($srcRow['p_wt'] ?? 0)
-              + (float)($srcRow['p_each'] ?? 0) * $lbPerItem;
-$donatedLbs   = (float)($srcRow['d_lb'] ?? 0) + (float)($srcRow['d_wt'] ?? 0)
-              + (float)($srcRow['d_each'] ?? 0) * $lbPerItem;
+//   purchased lb = est. lb distributed × restocked_purchased / (purchased + donated)
+//   donated   lb = the remainder
+//
+// An item the Restock page has never recorded as purchased — both counters at
+// zero, or purchased at zero — shows "—" or 0% on Inventory and is taken as
+// wholly donated, which is how food reaches this pantry by default.
+//
+// That default is only defensible where *something* has been restocked. On an
+// install where the Restock page has never been used at all, every item lands
+// in the no-ratio bucket and the arithmetic below would report a confident
+// "100% donated" built on no evidence whatsoever — to a page written for
+// donors and boards. So the pounds carrying a real ratio are tracked
+// separately, and with none of them the card and the hero stat say there is
+// nothing to report rather than inventing a figure.
+//
+// The ratio itself is lifetime (Restock keeps running totals, not a dated log),
+// but the pounds it is applied to are the filtered period's, so unlike the old
+// all-time restock mix this figure does follow the date filter.
+$boughtShare = [];   // generic_name => 0..1, absent when no restock history
+foreach ($db->query("SELECT generic_name, restocked_purchased, restocked_donated
+                       FROM inventory") as $r) {
+    $p = (float)$r['restocked_purchased'];
+    $d = (float)$r['restocked_donated'];
+    $t = $p + $d;
+    if ($t > 0) $boughtShare[(string)$r['generic_name']] = max(0.0, min(1.0, $p / $t));
+}
+
+$purchasedLbs = 0.0;
+$donatedLbs   = 0.0;
+$noRatioLbs   = 0.0;   // pounds with no Bought % on record → booked as donated
+$ratioLbs     = 0.0;   // pounds an actual restock ratio was applied to
+foreach ($topRows as $r) {
+    $lbs = (float)$r['est_lbs'];
+    if ($lbs <= 0) continue;
+    if (isset($boughtShare[$r['name']])) {
+        $share         = $boughtShare[$r['name']];
+        $purchasedLbs += $lbs * $share;
+        $donatedLbs   += $lbs * (1 - $share);
+        $ratioLbs     += $lbs;
+    } else {
+        $donatedLbs   += $lbs;
+        $noRatioLbs   += $lbs;
+    }
+}
 $sourcedLbs   = $purchasedLbs + $donatedLbs;
-$donatedPct   = $sourcedLbs > 0 ? round(100 * $donatedLbs / $sourcedLbs) : 0;
+// Not "did anything go out the door" but "is any of it backed by restock
+// history" — the whole split is guesswork without at least one item's ratio.
+$hasSourcing  = $ratioLbs > 0;
+$donatedPct   = $hasSourcing ? round(100 * $donatedLbs / $sourcedLbs) : 0;
+$noRatioPct   = $sourcedLbs > 0 ? round(100 * $noRatioLbs / $sourcedLbs) : 0;
 
 // ── Delivery roster (no PII) ──────────────────────────────────────────────
 // Counts and household sizes only. Name/address/phone are never read here —
@@ -705,7 +735,7 @@ renderNav('impact');
         </div>
         <div>
           <label for="lb_per_meal" title="Feeding America uses 1.2 lb per meal.">lb per Meal</label>
-          <input type="number" step="0.1" min="0.25" max="10" id="lb_per_meal" name="lb_per_meal" value="<?= htmlspecialchars((string)$lbPerMeal) ?>">
+          <input type="number" step="0.05" min="0.25" max="10" id="lb_per_meal" name="lb_per_meal" value="<?= htmlspecialchars((string)$lbPerMeal) ?>">
         </div>
       </div>
       <div class="row" style="margin-top:14px;">
@@ -753,9 +783,10 @@ renderNav('impact');
         <div class="sub">person-visits, where recorded</div>
       </div>
       <div class="hero-stat">
-        <div class="v"><?= $donatedPct ?>%</div>
+        <div class="v"><?= $hasSourcing ? $donatedPct . '%' : '&mdash;' ?></div>
         <div class="k">Food Donated</div>
-        <div class="sub">all-time restock mix</div>
+        <div class="sub"><?= $hasSourcing
+          ? 'of pounds distributed' : 'no restock history yet' ?></div>
       </div>
       <div class="hero-stat">
         <div class="v"><?= opN($distinctItems) ?></div>
@@ -866,14 +897,18 @@ renderNav('impact');
     <div class="card">
       <h2>🤝 Where the Food Comes From</h2>
       <p class="lede" style="margin-bottom:10px;">
-        Donated vs purchased, from lifetime restock totals
-        (<strong>all-time, not filtered by date</strong> &mdash; the Restock page
-        keeps running totals, not a dated log).
+        The pounds handed out in this period, split by how the pantry came by
+        them: each item's estimated pounds are apportioned at its
+        <strong>Bought&nbsp;%</strong> on the Inventory page, and anything with no
+        purchase on record counts as donated.
       </p>
-      <?php if ($sourcedLbs > 0): ?>
+      <?php if ($hasSourcing): ?>
         <div class="chart-wrap" style="height:290px;"><canvas id="srcChart"></canvas></div>
+      <?php elseif ($sourcedLbs > 0): ?>
+        <div class="no-data">No restock history recorded yet, so the pounds handed
+          out in this period can't be split by source.</div>
       <?php else: ?>
-        <div class="no-data">No restock history recorded yet.</div>
+        <div class="no-data">No food scanned out in this period.</div>
       <?php endif; ?>
     </div>
   </div>
@@ -1116,9 +1151,17 @@ renderNav('impact');
       <li><strong>People reached is a floor.</strong> Household size is recorded only for
         home deliveries and counter requests; in-pantry shopping and event orders carry no
         household count, so real reach is higher than the figure shown.</li>
-      <li><strong>Sourcing mix is all-time.</strong> The Restock page keeps lifetime
-        donated/purchased totals per item with no dated log, so the donated share ignores
-        the date filter above.</li>
+      <li><strong>Sourcing is apportioned, not logged per scan.</strong> Nothing
+        records where a particular can came from, so the pounds distributed in this period
+        are split at each item's <strong>Bought&nbsp;%</strong> &mdash; its lifetime
+        <em>purchased &divide; (purchased + donated)</em> from the Restock page, the same
+        figure the Inventory page shows. An item with no purchase on record (Bought shows
+        &ldquo;&mdash;&rdquo; or 0%) is taken as wholly donated<?= $noRatioLbs > 0
+          ? ', which covers ' . $noRatioPct . '% of the pounds here' : '' ?>.
+        <?= $hasSourcing ? '' : 'No item has any restock history at all, so no split is'
+          . ' shown above rather than reporting everything as donated on no evidence. ' ?>The
+        pounds follow the date filter; the ratio applied to them is lifetime, because
+        Restock keeps running totals rather than a dated log.</li>
       <?php if ($unscannedDays > 0): ?>
       <li><strong><?= opN($unscannedDays) ?> operating day<?= $unscannedDays === 1 ? '' : 's' ?>
         in this period went unscanned</strong> (recorded in <code>unscanned_days</code>).
@@ -1368,7 +1411,7 @@ renderNav('impact');
       }
     });
 
-    <?php if ($sourcedLbs > 0): ?>
+    <?php if ($hasSourcing): ?>
     new Chart(document.getElementById('srcChart'), {
       type:'doughnut',
       data:{

@@ -38,8 +38,13 @@ CREATE TABLE IF NOT EXISTS scans (
 );
 
 CREATE INDEX IF NOT EXISTS idx_scans_order   ON scans(order_id);
-CREATE INDEX IF NOT EXISTS idx_scans_generic ON scans(generic_name);
 CREATE INDEX IF NOT EXISTS idx_scans_when    ON scans(scanned_at);
+-- generic_name leftmost, so this serves plain name lookups too; `kind` rides
+-- along so the Inventory page's `SELECT DISTINCT generic_name, kind` is answered
+-- from the index instead of visiting every scan row. On installs that predate
+-- this, db.php's migrateWidenScansGenericIndex() creates it and drops the
+-- narrower idx_scans_generic it replaces.
+CREATE INDEX IF NOT EXISTS idx_scans_generic_kind ON scans(generic_name, kind);
 
 -- Team scanning: a station that has joined *another* station's open order to
 -- help check the same household out. One row per helper station per order;
