@@ -59,7 +59,7 @@ E.append(Spacer(1, 0.55 * inch))
 E.append(Paragraph("Setup, configuration, security, reporting, and day-to-day "
                    "operation of OpenPantry.", cover_center))
 E.append(Spacer(1, 0.35 * inch))
-E.append(Paragraph("Revised July 2026 &nbsp;•&nbsp; Version 1.1", cover_center))
+E.append(Paragraph("Revised September 2026 &nbsp;•&nbsp; Version 1.2", cover_center))
 E.append(Paragraph("© 2026 Chromagic Development • Bruce Alexander "
                    "• MIT License", cover_center))
 E.append(PageBreak())
@@ -126,9 +126,13 @@ E.append(bullet("<b>Supervisor password</b> (optional) — a second login for "
 E.append(bullet("<b>OpenAI API key</b> — powers automatic "
                 "brand→generic naming on new barcodes. Use the <b>test</b> "
                 "button to confirm it works. Stored encrypted at rest."))
-E.append(bullet("<b>Network Access IP</b> — set to your pantry's public "
-                "Wi-Fi address so the kiosks only work on-site. Leave blank "
-                "during setup to avoid locking yourself out, then set it."))
+E.append(bullet("<b>Secure Network Access</b> — set the <b>Public IPv4 "
+                "Address</b> to your pantry's public Wi-Fi address so the kiosks "
+                "only work on-site. Up to <b>two additional addresses</b> can "
+                "be allowed as well — a backup internet line, or a second site. "
+                "Leave them all blank during setup to avoid locking yourself "
+                "out, then set them. A supervisor can change the primary "
+                "address; the two additional ones are administrator-only."))
 E.append(bullet("<b>Allowed hours</b> — optional weekly schedule that "
                 "closes the kiosks outside service times."))
 E.append(bullet("<b>Administrator email</b> — where reorder-reminder "
@@ -155,7 +159,20 @@ E.append(bullet("<b>USB scale pairing</b> — a HID Point-of-Sale scale (the "
                 "and the scale strip described in the Volunteer Handbook "
                 "never appears."))
 E.append(bullet("<b>Par-level defaults</b> — default lead time and "
-                "safety-stock Z used by the Order Now report."))
+                "safety-stock Z used by the Order Now report, plus <b>Max "
+                "Storage (cu ft)</b>: the report totals the cubic feet an order "
+                "needs (from each item's Cu Ft/Case on the Inventory page) and "
+                "warns when it goes over. 0 turns the check off."))
+# Settings → Ignore Unknown Items. The volunteer book explains what the station
+# does; this is the decision behind it and where the deferred naming happens.
+E.append(bullet("<b>Ignore Unknown Items</b> — off, a barcode nobody can name "
+                "stops the line with the <i>Identify this item</i> window. On, "
+                "the station records it under the placeholder name "
+                "<b>Unidentified</b> and moves on — useful for donated goods "
+                "you never reorder. The volume still counts in orders and "
+                "reports, but <b>Unidentified</b> never drives a reorder. Turn "
+                "it back off and the next scan of each such barcode asks for a "
+                "name, which also renames that barcode's past scans."))
 E.append(bullet("<b>Food pantry name &amp; logo</b> — branding shown in "
                 "the header and on printed sheets."))
 E.append(PageBreak())
@@ -180,8 +197,11 @@ E.append(bullet("<b>Login rate limiting</b> throttles failed admin logins per "
                 "code can be sent). A successful login clears the slate. Covers "
                 "both the OpenPantry login and the Menu Counter item admin."))
 E.append(bullet("<b>Network + hours gate</b> (in " + code("auth.php") + ") "
-                "blocks any device that isn't on the allowed IP or is outside "
-                "allowed hours, with a styled “Access Denied” wall."))
+                "blocks any device that isn't on one of the allowed IPs or is "
+                "outside allowed hours, with a styled “Access Denied” "
+                "wall. A scanning station that is already open when the gate "
+                "starts refusing it gets a <b>The server refused this "
+                "station</b> window instead, naming which gate it hit."))
 E.append(bullet("<b>Encryption at rest</b> (libsodium) now covers <b>every "
                 "Settings value</b> — the OpenAI key, allowed IP, SMTP "
                 "credentials, and the rest (only the already-hashed admin "
@@ -244,7 +264,18 @@ E.append(bullet("<b>Order unit &amp; Avg Wt</b> — for produce the pantry weigh
                 "for everything else. Without an Avg Wt there is nothing to "
                 "convert by, so the order falls back to the stock unit."))
 E.append(bullet("<b>Checkout, deliveries, events, OrderAhead</b> all decrement "
-                "inventory automatically as orders close or imports run."))
+                "inventory automatically as orders close or imports run. "
+                "Closing an order is all-or-nothing: every item comes out of "
+                "inventory together, or none do and the order stays open."))
+# inventory.php: remove_produce / remove_alerts, and the "alerts" filter value,
+# which matches every row of the alerts table (on or off), not a kind.
+E.append(bullet("<b>Zeroing stock in bulk</b> — <b>Remove Produce Stock</b> sets "
+                "every produce count to zero. <b>Remove Reorder Alerts Stock</b> "
+                "does the same for every item listed in the Order Now report's "
+                "Reorder Alerts card, whether its alert is switched on or off. "
+                "Both ask to confirm and can't be undone. To check which items "
+                "that covers first, pick <b>Reorder Alerts Only</b> in the type "
+                "filter above the table."))
 E.append(PageBreak())
 
 # ================================================================ lookup
@@ -266,6 +297,31 @@ E.append(bullet("<b>Add UPC Manually</b> — for codes Open Food Facts "
                 "can't resolve: type the UPC, an optional branded name, and "
                 "the generic name, and the mapping is cached (source "
                 + code("manual") + ") for all future scans of that code."))
+E.append(bullet("<b>Naming Unidentified barcodes</b> — a UPC recorded as "
+                "<b>Unidentified</b> (see Ignore Unknown Items) can be named "
+                "right here in the UPC cache instead of waiting for a volunteer "
+                "to scan it again. Renaming a UPC also renames that barcode's "
+                "own past scans; other Unidentified barcodes are left alone."))
+
+# Recalls: upc_lookup.recalled, enforced in lookupBarcode() — which is why the
+# block reaches stations that were already open when the box was ticked.
+E.append(Paragraph("Product recalls", S["h3"]))
+E.append(body("When a product is recalled, find its UPC in the <b>UPC / "
+              "Generic Cache</b> and tick <b>Recalled</b>. From that moment "
+              "<b>every</b> scanning station refuses the item — including ones "
+              "that were already open — because the check is made on the "
+              "server, not the page. A volunteer who scans it gets a red, "
+              "pulsing <b>Recalled Product</b> window and a siren, and has to "
+              "confirm the package is out of the cart before carrying on. "
+              "Nothing is recorded, so there is nothing to undo."))
+E.append(bullet("The UPC mapping and its scan history are untouched; clear the "
+                "box to put the item back into service."))
+E.append(bullet("Ticking and clearing <b>Recalled</b> is administrator-only. A "
+                "supervisor sees the box but can't change it."))
+E.append(warn("A RECALL AT THE STATION MEANS STOCK ON YOUR SHELVES",
+    "Volunteers are told to tell the administrator on duty whenever the recall "
+    "window fires. Take that as the cue to pull the rest of the lot from the "
+    "shelves — the station only catches the packages that reach checkout."))
 
 E.append(Paragraph("Merging duplicate item names", S["h3"]))
 E.append(body("The generic name <i>is</i> the item — there is no id behind it "
@@ -277,8 +333,10 @@ E.append(body("The generic name <i>is</i> the item — there is no id behind it 
               "history, its own inventory row, and its own reorder alert, "
               "which splits demand in half and <b>biases both par levels "
               "low</b>. The <b>De-duplicate</b> tool merges them back "
-              "together. It is deliberately kept off the menu — browse to "
-              + code("/openpantry/deduplicate/") + " when you need it."))
+              "together. It is kept off the main menu: open it with the "
+              "<b>Consolidate Names</b> button on <b>Settings</b> "
+              "(administrator only — a supervisor sees it greyed out), or "
+              "browse to " + code("/openpantry/deduplicate/") + "."))
 E.append(bullet("<b>Possible Duplicates</b> — names that match once case, "
                 "punctuation, word order, and plurals are ignored are grouped "
                 "for you. Click <b>keep</b> on the spelling you want and "
@@ -295,7 +353,10 @@ E.append(bullet("<b>Renaming an item outright</b> — type a name in the "
 E.append(bullet("<b>“No barcode”</b> in the name table means no UPC "
                 "or produce code still resolves to that name, so nothing new "
                 "can be scanned into it. Usually a leftover from a rename — a "
-                "good merge candidate."))
+                "good merge candidate. An <b>Orphan row</b> has no scans and no "
+                "codes at all — just an inventory row or reorder alert no other "
+                "page can reach — and can be <b>deleted</b> outright. Anything "
+                "with scan history has to be merged instead."))
 E.append(warn("A MERGE REWRITES HISTORY AND CANNOT BE UNDONE",
     "Merging edits past scans, not just future ones — that is the point, but "
     "there is no undo. Back up " + code("openpantry.db") + " before a big "
@@ -311,7 +372,12 @@ E.append(good("MERGE BEFORE YOU TRUST A NEW ITEM'S PAR LEVEL",
 E.append(kicker("TURNING SCANS INTO DECISIONS"))
 E += h1("Reports &amp; the demand model")
 E.append(bullet("<b>Order Now</b> — the reorder report. Computes a Par "
-                "Level and how much to order per item."))
+                "Level and how much to order per item. Its <b>Reorder "
+                "reminders</b> line is grouped by unit, biggest request first, "
+                "and the <b>Restock</b> box starts ticked on exactly those "
+                "reminder rows that have an order request, so <b>Generate "
+                "Email</b> and <b>Restock Now</b> act on what the page is "
+                "asking you to order. Tick or untick rows to change that."))
 E.append(bullet("<b>Orders Listing</b> — every order and its items over a "
                 "date range (delivery/event orders are tagged)."))
 E.append(bullet("<b>Item Usage</b> — per-item totals over a date range."))
@@ -323,7 +389,10 @@ E.append(bullet("<b>Basket Size</b> — distribution of items per in-pantry "
 E.append(bullet("<b>Impact</b> — the report you hand a board member or a "
                 "grant officer: pounds distributed, households and people "
                 "reached, top items, and where the food came from, over a "
-                "window that defaults to the last 12 months. It is the only "
+                "window you choose. The first time, it opens on the first of "
+                "last month; after that it remembers the last <b>Start "
+                "Date</b> you ran it with, and <b>Reset</b> forgets it. It is "
+                "the only "
                 "report that reads <b>both</b> databases — scans and orders "
                 "from " + code("openpantry.db") + ", counter requests and "
                 "household sizes from " + code("picklist.db") + " — and it "
@@ -338,6 +407,20 @@ E.append(info("THE IMPACT REPORT'S TWO ASSUMPTIONS ARE YOURS TO SET",
     "inputs and are restated in its <b>Methodology &amp; Caveats</b> card, so "
     "anyone reading the headline numbers can see what they depend on. Set them "
     "to whatever your funder expects before you print."))
+# impact_report.php: $boughtShare (period pounds × lifetime Bought share) and
+# $produceKindOf (the fresh-produce chart's roll-up by vocabulary).
+E.append(bullet("<b>Where the Food Comes From</b> covers the pounds "
+                "distributed in the chosen window, split donated vs. purchased "
+                "by each item's lifetime <b>Bought</b> share from Restock. With "
+                "no restock history at all it says so, rather than claiming "
+                "everything was donated — so record restocks as purchased or "
+                "donated if you want this card to mean something."))
+E.append(bullet("<b>The fresh-produce chart groups varieties</b> into one bar "
+                "per kind — Romaine and Iceberg both count as Lettuce, Sweet "
+                "Potatoes as Potatoes. Hover a bar to see which items it "
+                "includes. A name with no recognized kind keeps its own bar. "
+                "The <b>Top Items Detail</b> table still lists individual "
+                "items."))
 E.append(Paragraph("How Par Level is computed", S["h3"]))
 E.append(body("For each item: <b>Par Level = Forecast(LeadTime) + "
               "SafetyStock</b>, where <b>SafetyStock = Z × "
@@ -389,8 +472,9 @@ E.append(bullet("<b>Item admin</b> — add, remove, reorder (drag &amp; "
                 "5, rounded up) that decides how many units land in the pick "
                 "queue."))
 E.append(bullet("<b>Pick queue (Orders)</b> — the live back-of-house "
-                "dashboard volunteers pull from; auto-refreshes every 30 "
-                "seconds."))
+                "dashboard volunteers pull from; auto-refreshes every 5 "
+                "seconds, and stops the pickers with a connection-lost window "
+                "if it can't reach the server (see below)."))
 E.append(bullet("<b>Deduplicate</b> — merge duplicate item rows that "
                 "crept in over time. This one is the Menu Counter's own "
                 "order-form items; the item-name merge tool under Lookup "
@@ -428,6 +512,89 @@ E.append(warn("THE AI READS CHECKBOXES ONLY",
     "change by hand when packing; the packing list will otherwise show the "
     "standard computed amount."))
 
+# ================================================================ uptime
+# monitor.php, plus the connection watch shared by scan.php and orders.php. The
+# station windows are taught to volunteers in their own book; what belongs here
+# is what each of the three messages asks the administrator to do.
+E.append(kicker("WATCHING THE SERVER"))
+E += h1("The Uptime Monitor")
+E.append(Paragraph(
+    "The Uptime Monitor is a dashboard for whoever looks after the pantry's "
+    "systems. Left open in a browser window, it checks the OpenPantry server "
+    "every few seconds — whether or not anyone is scanning — sounds an alarm "
+    "when it can't be reached, and keeps a timestamped log of every problem "
+    "and recovery.", S["lead"]))
+E.append(bullet("<b>Opening it</b> — <b>Monitor Uptime</b> on the Settings "
+                "page, or browse to " + code("/openpantry/monitor.php") + ". "
+                "Either login works, administrator or supervisor. Unlike the "
+                "stations it is <b>not</b> limited to the pantry's network, so "
+                "it can run from home or an office."))
+E.append(bullet("<b>How often it checks</b> — every 3 seconds during the "
+                "Allowed Hours set in Settings, and once a minute outside them "
+                "so an overnight monitor costs the server next to nothing. A "
+                "failed check switches it straight back to every 3 seconds. "
+                "With Allowed Hours turned off, it checks every 3 seconds all "
+                "the time."))
+E.append(bullet("<b>What a check covers</b> — the server itself, plus today's "
+                "order counts from <b>both</b> databases (scan station and Menu "
+                "Counter), so a database fault shows up too. One missed check "
+                "is logged as a blip; two in a row is an outage."))
+E.append(bullet("<b>The status card</b> — green <b>Online</b> while all is "
+                "well; yellow <b>Server up — database problem</b> when a "
+                "database can't be read; red and flashing during an outage, "
+                "which also raises a red window you can hide (the card stays "
+                "red) and says whether the fault is this computer's internet or "
+                "the server. Grey <b>Signed out</b> means the login lapsed — "
+                "that pauses the checks rather than counting as downtime, so "
+                "sign in again. The browser tab's title shows the same state. "
+                "Below the card: uptime since opened, outage count and total "
+                "downtime, the last good check with its response time, and "
+                "orders today at each station."))
+E.append(bullet("<b>Sounds</b> — the same three falling notes the stations "
+                "play on an outage, repeated every 15 seconds while it lasts, "
+                "and three rising notes on recovery. <b>Test sounds</b> plays "
+                "both; <b>Sound on / off</b> silences them."))
+E.append(bullet("<b>The event log</b> lives in the page only — refreshing or "
+                "closing the tab starts a new one. <b>Copy log</b> copies it as "
+                "text for an email or a ticket to the hosting company."))
+E.append(warn("THREE THINGS THAT QUIETLY STOP IT",
+    "<b>Click the page once</b> after opening it: Chrome won't let a page play "
+    "sounds until it has been clicked, and the page shows a reminder until you "
+    "do. <b>Keep it in its own window</b>, and add the site under Chrome "
+    "Settings → Performance → “Always keep these sites active” — "
+    "otherwise Memory Saver can put a long-idle tab to sleep and the checks "
+    "stop. And <b>clicking away</b> (the Settings button included) ends "
+    "monitoring and its log."))
+E.append(info("WHERE YOU RUN IT DECIDES WHAT IT SEES",
+    "The monitor tests the connection <b>from the computer it's open on</b>. "
+    "Run at the pantry, it also catches the pantry's own internet going down. "
+    "Run from home, it watches the server only — it can't tell whether the "
+    "pantry itself is online."))
+
+E.append(Paragraph("When a station loses the server", S["h3"]))
+E.append(body("The scanning stations and the Menu Counter pick queue watch "
+              "their own connection the same way. If a request gets no answer, "
+              "a red <b>Connection lost</b> window stops the volunteer, refuses "
+              "anything they try to save, and checks every few seconds until "
+              "the server answers again. It then lifts itself and lists "
+              "anything that was <b>not saved</b> or <b>may not have "
+              "saved</b>, so it can be redone or checked. The window names one "
+              "of three causes, and each asks something different of you:"))
+E.append(bullet("<b>No internet connection</b> — the pantry's own network: "
+                "Wi-Fi, cabling, router, or the internet service. The server "
+                "is fine."))
+E.append(bullet("<b>The pantry server isn't responding</b> — the pantry's "
+                "internet works but the OpenPantry host doesn't (a crash, the "
+                "host's resource limits, maintenance). Restarting the router "
+                "won't help; contact the hosting company, with the monitor's "
+                "log if you have it."))
+E.append(bullet("<b>The server refused this station</b> — the network gate "
+                "turned it away. Either the pantry's public address changed "
+                "(update <b>Secure Network Access</b> — a supervisor can do "
+                "this), or it's outside <b>Allowed Hours</b>. The window lifts "
+                "by itself as soon as the station is let back in."))
+E.append(PageBreak())
+
 E.append(kicker("KEEPING IT HEALTHY"))
 E += h1("Maintenance &amp; troubleshooting")
 E.append(bullet("<b>Backups</b> — back up " + code("openpantry.db") + ", "
@@ -443,12 +610,38 @@ E.append(bullet("<b>New barcode saved with a raw name?</b> The OpenAI step was "
                 "skipped (bad/rate-limited key). Fix the key and edit the name "
                 "under Lookup Tables."))
 E.append(bullet("<b>Same item listed twice in a report?</b> Two spellings of "
-                "one generic name. Merge them at "
-                + code("/openpantry/deduplicate/") + ", which also recombines "
+                "one generic name. Merge them with <b>Consolidate Names</b> on "
+                "Settings (" + code("/openpantry/deduplicate/") + "), which "
+                "also recombines "
                 "the split scan history the par levels are built from."))
-E.append(bullet("<b>“Access Denied” for legitimate staff?</b> The "
-                "public Wi-Fi IP changed or you're outside allowed hours. "
-                "Update the allowed IP in Settings."))
+E.append(bullet("<b>“Access Denied” (or “The server refused "
+                "this station”) for legitimate staff?</b> The public Wi-Fi "
+                "IP changed or you're outside allowed hours. Update the allowed "
+                "IP in Settings — or add the new line as one of the two "
+                "additional addresses if the pantry now has more than one."))
+E.append(bullet("<b>Stations showing “Connection lost”?</b> Read "
+                "which of the three causes the window names (see “When a "
+                "station loses the server”). Running the Uptime Monitor "
+                "at the pantry gives you the timeline to hand the host."))
+# api_order.php answers End/Cancel failures as JSON, and isDbBusyError() picks
+# the wording. The volunteer book teaches the same distinction.
+E.append(bullet("<b>End Order or Cancel refused?</b> If the message says the "
+                "database was <b>busy</b>, another station was writing at that "
+                "moment — tapping End again goes through. If it says "
+                "<b>trying again will not help</b>, something is actually "
+                "wrong; look at the host's error log. Either way the order is "
+                "left exactly as it was — a failed close deducts nothing."))
+# The Assist card's End/Cancel buttons (scan.php $canRemoteClose →
+# remote_end / remote_cancel in api_order.php).
+E.append(bullet("<b>An order stuck open on a station that's gone?</b> Only "
+                "the station that started an order can close it, so a laptop "
+                "closed or a tablet carried off mid-order leaves it open, and "
+                "stations in Assist mode keep re-joining it. Sign in as "
+                "administrator or supervisor on any idle scanning station: the "
+                "<b>Another station is scanning</b> card then offers <b>End</b> "
+                "and <b>Cancel</b> for each open order. End deducts its items "
+                "exactly as if its own station had; Cancel discards its scans. "
+                "Both ask to confirm."))
 E.append(bullet("<b>Locked out by the login throttle?</b> Wait out the timer, "
                 "or use the 6-digit code emailed to the administrator address. "
                 "A successful login resets the counter; 30 quiet minutes decay "

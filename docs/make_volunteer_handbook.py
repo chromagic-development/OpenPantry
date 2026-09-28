@@ -33,7 +33,7 @@ E += cover(
     subtitle="Volunteer Handbook",
     badge_text="FOR VOLUNTEERS",
     blurb="How to open and run the checkout and Menu Counter stations.",
-    revision="Revised September 2026 &nbsp;•&nbsp; Version 1.2")
+    revision="Revised September 2026 &nbsp;•&nbsp; Version 1.3")
 
 # ================================================================ welcome
 E.append(kicker("START HERE"))
@@ -56,7 +56,9 @@ E.append(warn("GOLDEN RULE",
     "break the data. <b>One exception:</b> if a red <b>Recalled Product</b> "
     "window fills the screen and an alarm sounds, don't wait for anyone — take "
     "that item out of the cart first, then carry on. See “When an item has "
-    "been recalled.”"))
+    "been recalled.” And if a <b>Connection lost</b> window covers the screen "
+    "with three falling notes, stop scanning and wait — see “When the "
+    "connection drops.”"))
 
 E.append(kicker("BEFORE YOU BEGIN"))
 E += h1("Getting on the stations")
@@ -80,6 +82,14 @@ E.append(bullet(
     "under Secure Network Access press <b>Use My Current IP</b> and then "
     "<b>Set IP Address</b>. That is the one setting a supervisor can change — "
     "the rest of the page is read-only for them, so there is nothing to break."))
+# The same refusal, met mid-shift instead of on opening the page: the station
+# window (scan.php renderNetPrompt, kind 'refused') names the gate it hit.
+E.append(bullet(
+    "If the address changes <i>while</i> the Scan page is already open, you "
+    "won't see the Access Denied screen. Instead a <b>The server refused this "
+    "station</b> window comes up and says why — the network address, or the "
+    "pantry's hours. It clears itself as soon as the address is fixed or the "
+    "hours open; see “When the connection drops.”"))
 E.append(bullet(
     "A password is only requested on <b>administrator</b> screens — item "
     "setup, Settings, reports, and the delivery client list. Volunteers don't "
@@ -128,7 +138,9 @@ E.append(body(
     "labeled <b>Barcode or Item Name</b> — start typing and, after two "
     "letters, matching items from the catalog appear beneath it as you type. "
     "When your text matches a single item, press <b>Enter</b> (or Tab) to "
-    "record it, exactly as if you'd scanned it. Digits on their own are still "
+    "record it, exactly as if you'd scanned it — or just tap it in the list. "
+    "The best match is always first and printed twice as large, so it is an "
+    "easy target on a touch screen. Digits on their own are still "
     "treated as a barcode, so typing a name never interferes with the "
     "scanner."))
 E.append(good("FASTEST FIX FOR A TORN OR MISSING BARCODE",
@@ -366,6 +378,64 @@ E.append(info("IF THE SHOPPER ASKS",
     "fetch the administrator."))
 E.append(PageBreak())
 
+# ================================================================ outages
+# scan.php's connection watch (postJson → connectionLost). The window has no
+# buttons on purpose, so the page teaches waiting; what a volunteer must learn is
+# the difference between the two lists on the restored notice — "not recorded"
+# means scan again, "may not have saved" means look first — because re-scanning
+# the second kind blind counts the item twice.
+E.append(kicker("IF THE INTERNET GOES DOWN"))
+E += h1("When the connection drops")
+E.append(Paragraph(
+    "Every scan is saved on the pantry's server over the internet. If the "
+    "station loses touch with the server, it stops you straight away rather "
+    "than letting you scan items that quietly go nowhere.", S["lead"]))
+E.append(body(
+    "You'll know at once. A red <b>Connection lost</b> window covers the "
+    "screen, headed <b>Connection problem — stop scanning</b>, and the station "
+    "plays <b>three long falling notes</b> — slower and lower than the recall "
+    "siren, and nothing like the short buzz of a rejected item. Within a few "
+    "seconds the window says which of three things has gone wrong:"))
+E.append(bullet("<b>No internet connection</b> — the problem is at the pantry: "
+                "the Wi-Fi, a cable, or the router. Check the tablet is still on "
+                "the pantry Wi-Fi and tell whoever looks after the router."))
+E.append(bullet("<b>The pantry server isn't responding</b> — the pantry's "
+                "internet is fine; the website itself is down. Restarting the "
+                "router won't help. If it lasts more than a few minutes, tell "
+                "the administrator."))
+E.append(bullet("<b>The server refused this station</b> — the server is up but "
+                "is turning this station away, because the pantry's network "
+                "address has changed or scanning is outside the pantry's hours. "
+                "A supervisor or administrator can fix the address in Settings "
+                "(see “Getting on the stations”)."))
+E.append(step(1, "<b>Stop scanning.</b> There is nothing to press — the window "
+                 "has no buttons, because the only fix is the connection "
+                 "coming back."))
+E.append(step(2, "Anything scanned while the window is up is refused with a buzz "
+                 "and <b>not recorded</b>. The window lists those barcodes; set "
+                 "the items aside so you can scan them again."))
+E.append(step(3, "The station checks the connection every few seconds on its "
+                 "own. When it's back, the window lifts with <b>three rising "
+                 "notes</b> and a green notice says <b>Connection restored — "
+                 "you can scan again</b>. The <b>This Order</b> list is redrawn "
+                 "from the server, so it shows exactly what was saved."))
+E.append(step(4, "Read the green notice before you carry on. It stays up for "
+                 "30 seconds when there is something on it."))
+E.append(warn("“NOT RECORDED” AND “MAY NOT HAVE SAVED” ARE DIFFERENT",
+    "The notice can list items two ways, and they need opposite handling. "
+    "<b>NOT recorded, scan again</b> means the item certainly didn't reach the "
+    "server — scan it again. <b>Check This Order for …</b> means the connection "
+    "dropped while that item was being saved, so it may have landed. "
+    "<b>Look for it in This Order first</b>, and scan it again only if it isn't "
+    "there — scanning it blind could count it twice."))
+E.append(info("NOTHING ALREADY SAVED IS LOST",
+    "An outage never undoes scans that were saved before it. The order stays "
+    "open on the server, with everything on it, and carries on once the "
+    "connection returns. A weight, name, or recall window you hadn't finished "
+    "when the line dropped is still there underneath when the window lifts — "
+    "finish it then."))
+E.append(PageBreak())
+
 # ================================================================ team scanning
 # Two stations, one order. Ownership never moves: only the station that started
 # the order can End or Cancel it.
@@ -467,8 +537,23 @@ E.append(step(3, "Use <b>+</b> to add another of an item, or <b>×</b> to remove
                  "one that's out of stock or entered accidentally."))
 E.append(step(4, "Once every item is checked, tap <b>Mark Complete</b> to clear "
                  "the order from the queue."))
-E.append(step(5, "The queue refreshes on its own every 30 seconds — no need to "
-                 "reload."))
+E.append(step(5, "The queue refreshes on its own every 5 seconds — no need to "
+                 "reload. The dot beside <b>Refresh</b> pulses green while it "
+                 "does."))
+# orders.php runs the same connection watch as the scan station (apiFetch →
+# connectionLost), with "stop picking" wording and a reload from the server on
+# reconnect instead of a This Order redraw.
+E.append(info("IF THE PICK QUEUE LOSES ITS CONNECTION",
+    "The pick queue watches its connection the same way the scanning station "
+    "does. If it can't reach the server, the dot beside Refresh turns red, a "
+    "<b>Connection problem — stop picking</b> window covers the screen with "
+    "three falling notes, and it says whether it's the internet or the server. "
+    "Stop ticking items — a tick made now would look saved and not be. When "
+    "the connection returns the window lifts with three rising notes and the "
+    "picklist <b>reloads from the server</b>, so every check mark shows what "
+    "was really saved. The green notice lists any tick, <b>+</b>, <b>×</b>, or "
+    "<b>Mark Complete</b> that was <b>NOT saved</b> (do it again) or that "
+    "<b>may have saved</b> (look before you redo it)."))
 E.append(PageBreak())
 
 # ================================================================ other channels
