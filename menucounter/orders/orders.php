@@ -316,6 +316,38 @@ if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
     transition: all .3s; pointer-events: none; z-index: 999;
   }
   .toast.show { transform: translateY(0); opacity: 1; }
+  /* The connection-restored notice: larger and green, and held long enough to
+     be read by someone who walked away from the screen during the outage. */
+  .toast.ok { background: var(--done); font-size: 1rem; max-width: 520px; line-height: 1.4; }
+
+  /* The dot beside Refresh stops pulsing and turns red while the server
+     can't be reached, so the header says so even behind the window below. */
+  .refresh-dot.down { background: var(--warn); animation: none; }
+
+  /* ── Connection-lost window ──────────── */
+  .net-overlay {
+    position: fixed; inset: 0; z-index: 1000; padding: 20px;
+    background: rgba(40, 8, 0, .80);
+    display: none; align-items: center; justify-content: center;
+  }
+  .net-overlay.show { display: flex; }
+  .net-modal {
+    background: #fff; border: 3px solid var(--warn); border-radius: 14px;
+    width: 100%; max-width: 560px; max-height: calc(100vh - 40px);
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,.35);
+  }
+  .net-header { padding: 20px 26px 14px; background: #F8D7DA; border-bottom: 1px solid #F1AEB5; }
+  .net-eyebrow { font-size: .78rem; text-transform: uppercase; letter-spacing: .5px;
+                 font-weight: 700; color: #8B1A1A; }
+  .net-title { font-size: 1.6rem; color: #8B1A1A; margin-top: 6px; line-height: 1.15; }
+  .net-body { padding: 18px 26px 6px; overflow-y: auto; }
+  .net-body p { font-size: 1rem; line-height: 1.45; }
+  .net-hint { font-size: .8rem !important; color: #777; margin-top: 12px; }
+  .net-lost { margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+              background: #FFF3CD; border: 1px solid #FFE69C; color: #806000;
+              font-weight: 700; font-size: .9rem; white-space: pre-line; display: none; }
+  .net-status { margin: 12px 0 18px; font-size: .8rem; color: #777; font-family: monospace; }
 
   /* ── Responsive ──────────────────────── */
   @media (max-width: 700px) {
@@ -343,8 +375,8 @@ if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
       <div class="stat-pill"><span>Pending: </span><span id="statPending">–</span></div>
       <div class="stat-pill"><span>Items Left: </span><span id="statItems">–</span></div>
     </div>
-    <span class="refresh-dot" title="Auto-refreshing every 15s"></span>
-    <button class="btn-refresh" onclick="loadOrders()">↺ Refresh</button>
+    <span class="refresh-dot" id="refreshDot" title="Auto-refreshing every 5s"></span>
+    <button class="btn-refresh" onclick="loadOrders(true)">↺ Refresh</button>
     <a href="../admin" class="btn-config">⚙ Manage Items</a>
   </div>
 </header>
@@ -375,6 +407,32 @@ if (!fsScheduleAllowsNow(foodscanSetting('access_schedule', ''))) {
 
 <div class="toast" id="toast"></div>
 
+<!-- Connection-lost window. Raised by connectionLost() when the server can't be
+     reached and lowered by the recovery probe on its own. It has no controls,
+     because the fix is waiting or fixing the network, and its falling notes
+     sound once, when it opens. It covers the whole page on purpose: a tick
+     made now would look saved and not be. -->
+<div class="net-overlay" id="netPrompt" aria-hidden="true">
+  <div class="net-modal" role="alertdialog" aria-modal="true"
+       aria-labelledby="netTitle" aria-describedby="netBody">
+    <div class="net-header">
+      <div class="net-eyebrow">⚠ Connection problem — stop picking</div>
+      <h2 class="net-title" id="netTitle">Connection lost</h2>
+    </div>
+    <div class="net-body">
+      <p id="netBody"></p>
+      <div class="net-lost" id="netLost"></div>
+      <p class="net-hint">
+        This page is checking the connection every few seconds and will tell
+        you, with a rising chime, when you can carry on. When it does, the
+        picklist is reloaded from the server so every tick shows what was
+        really saved.
+      </p>
+      <div class="net-status" id="netStatus"></div>
+    </div>
+  </div>
+</div>
+
 <footer style="text-align:center; padding:24px 16px; font-size:.78rem; color:#999; border-top:1px solid var(--border); margin-top:40px;">
   &copy; 2026 <strong>Chromagic Development</strong> &mdash;
   <strong>Bruce Alexander</strong>.
@@ -391,13 +449,345 @@ const CAT_ICONS = {
   'DRY GOODS': '🥫', 'PRODUCE': '🥬', 'OTHER ITEMS': '📦'
 };
 
-// ── Load orders from API ────────────────────────────────────────────
-async function loadOrders() {
+// ── Sounds ──────────────────────────────────────────────────────────
+// Rendered with Web Audio, so no asset file is needed; the same two sounds the
+// scan station uses for the same two events.
+//   lostBeep()     — three long falling notes: the server can't be reached.
+//   restoredBeep() — the same three notes rising: connection back, carry on.
+let audioCtx = null;
+
+// Chrome won't start an AudioContext until the page has had a real gesture,
+// so a dashboard nobody has clicked since it loaded would lose its first
+// alert. Unlock on the first gesture of any kind.
+function unlockAudio() {
   try {
-    const res = await fetch('../api.php?action=get_orders');
-    const data = await res.json();
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { /* audio unavailable — fail silently */ }
+}
+['pointerdown', 'keydown', 'touchstart'].forEach((ev) =>
+  window.addEventListener(ev, unlockAudio, { once: true, capture: true }));
+
+function playTones(tones, level) {
+  try {
+    unlockAudio();
+    const t0 = audioCtx.currentTime;
+    for (const [offset, freq, dur, type] of tones) {
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type || 'square';
+      osc.frequency.value = freq;
+      const start = t0 + offset;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(level, start + 0.012);
+      gain.gain.setValueAtTime(level, start + dur - 0.02);
+      gain.gain.linearRampToValueAtTime(0, start + dur);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(start); osc.stop(start + dur + 0.01);
+    }
+  } catch (e) { /* audio unavailable — fail silently */ }
+}
+function lostBeep() {
+  playTones([[0, 784, 0.30], [0.36, 587, 0.30], [0.72, 392, 0.55]], 0.40);   // G5 D5 G4
+}
+function restoredBeep() {
+  playTones([[0, 523, 0.16, 'triangle'], [0.18, 659, 0.16, 'triangle'],
+             [0.36, 784, 0.34, 'triangle']], 0.55);                          // C5 E5 G5
+}
+
+// ── Connection watch ────────────────────────────────────────────────
+// Every request goes through apiFetch(), so this is where an outage is caught.
+// Before it, a dead connection was nearly silent here: a failed request showed
+// a small grey toast for 3.5 seconds, and a stalled one (Wi-Fi up, internet
+// down) never settled at all — a tick stayed green on screen without ever
+// reaching the server, and the 5-second refresh kept stacking more requests
+// behind it.
+//
+// Now any request that can't get an answer out of the server raises the
+// connection-lost window, and a probe asks the server every few seconds until
+// it answers. "Answer" means a JSON reply: {success:false} is the app refusing
+// one action, which the callers already report. A failed connection, a
+// timeout, or anything that isn't JSON (a host error page, CloudLinux's 508, a
+// Wi-Fi login page) is an outage.
+const NET_TIMEOUT_MS   = 8000;    // item ticks, duplicates, removals, complete/cancel
+const POLL_TIMEOUT_MS  = 5000;    // the 5-second queue refresh
+const PROBE_EVERY_MS   = 3000;    // recovery check cadence while down
+const PROBE_TIMEOUT_MS = 5000;
+
+// Raised by apiFetch() for every outage, so a caller can tell "the connection
+// is gone" from an ordinary {success:false}.
+class NetError extends Error {
+  constructor(kind, message, extra) {
+    super(message);
+    this.name     = 'NetError';
+    this.kind     = kind;        // 'unreachable' | 'refused'
+    this.deniedBy = (extra && extra.deniedBy) || null;
+    // Refused here because the line was already down: never left the page,
+    // so whatever it carried certainly wasn't saved.
+    this.notSent  = !!(extra && extra.notSent);
+  }
+}
+
+const net = {
+  down:      false,
+  kind:      null,     // 'unreachable' | 'refused'
+  where:     null,     // unreachable only: 'internet' | 'server' | null (still checking)
+  reason:    '',
+  deniedBy:  null,
+  since:     0,
+  checks:    0,
+  lastCheck: 0,
+  notSaved:  [],       // changes known not to have reached the server
+  maybe:     [],       // changes whose request failed mid-flight
+  probing:   false,
+  probeTimer: null,
+  pollFails:  0,       // consecutive failed refreshes (one is a blip, two an outage)
+};
+
+// opts.body     — FormData to POST (GET without it)
+// opts.timeout  — override the default timeout
+// opts.escalate — false: throw without raising the window (the refresh poll
+//                 decides for itself)
+// opts.probe    — the recovery probe: allowed through while the line is down
+async function apiFetch(url, opts) {
+  opts = opts || {};
+  if (net.down && !opts.probe) {
+    throw new NetError(net.kind, 'the connection is down', { notSent: true });
+  }
+  const timeoutMs = opts.timeout || NET_TIMEOUT_MS;
+  try {
+    let r, text;
+    try {
+      r = await fetch(url, {
+        method: opts.body ? 'POST' : 'GET',
+        body: opts.body,
+        cache: 'no-store',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await r.text();
+    } catch (e) {
+      throw new NetError('unreachable', e && e.name === 'TimeoutError'
+        ? 'no reply within ' + Math.round(timeoutMs / 1000) + ' seconds'
+        : 'the connection failed');
+    }
+    let d;
+    try { d = JSON.parse(text); } catch (e) {
+      throw new NetError('unreachable', 'it returned an error page, HTTP ' + r.status);
+    }
+    // Not sent by menucounter/api.php today, which has no network gate of its
+    // own; honoured so the page explains a refusal if one is ever added there
+    // the way auth.php's requireAllowedIPAPI() reports it.
+    if (d && d.access_denied) {
+      throw new NetError('refused', d.error || 'Access denied', { deniedBy: d.access_denied });
+    }
+    return d;
+  } catch (e) {
+    if (e instanceof NetError && !opts.probe && opts.escalate !== false) connectionLost(e);
+    throw e;
+  }
+}
+
+// Stop the page. Safe to call again while already down.
+function connectionLost(err) {
+  if (net.down) return;
+  Object.assign(net, {
+    down: true, kind: err.kind, reason: err.message, deniedBy: err.deniedBy,
+    where: err.kind === 'unreachable' && navigator.onLine === false ? 'internet' : null,
+    since: Date.now(), checks: 0, lastCheck: 0,
+    notSaved: [], maybe: [], pollFails: 0,
+  });
+  document.getElementById('netPrompt').classList.add('show');
+  document.getElementById('netPrompt').setAttribute('aria-hidden', 'false');
+  document.getElementById('refreshDot').classList.add('down');
+  renderNetPrompt();
+  lostBeep();   // once per outage — the window, not the sound, carries it after that
+  // Say straight away whether it's this computer's internet or the server,
+  // rather than leaving "checking…" up for a whole probe interval.
+  if (net.kind === 'unreachable' && net.where === null) {
+    internetReachable().then((ok) => {
+      if (net.down && net.kind === 'unreachable' && net.where === null) {
+        net.where = ok ? 'server' : 'internet';
+        renderNetPrompt();
+      }
+    });
+  }
+  scheduleProbe(PROBE_EVERY_MS);
+}
+
+// Is the wider internet up? Asked only once the pantry server has failed, to
+// tell a volunteer whether the problem is at their end. Google's
+// connectivity-check URL (the one Chrome itself uses) raced against a public
+// CDN. no-cors: the reply is opaque, but that it arrived at all is the answer.
+async function internetReachable() {
+  if (navigator.onLine === false) return false;
+  const ping = (u) => fetch(u, { mode: 'no-cors', cache: 'no-store',
+                                 signal: AbortSignal.timeout(4000) });
+  try {
+    await Promise.any([
+      ping('https://www.gstatic.com/generate_204'),
+      ping('https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/package.json'),
+    ]);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function scheduleProbe(ms) {
+  clearTimeout(net.probeTimer);
+  net.probeTimer = setTimeout(probe, ms);
+}
+
+// One recovery check: the same get_orders call the refresh makes, so a success
+// also hands back the queue to redraw from. The internet check runs alongside
+// it, so a failed probe can say which side is at fault straight away.
+async function probe() {
+  net.probeTimer = null;
+  if (!net.down || net.probing) return;
+  net.probing = true;
+  let d = null, err = null, internetOk = null;
+  try {
+    [d, internetOk] = await Promise.all([
+      apiFetch('../api.php?action=get_orders', { probe: true, timeout: PROBE_TIMEOUT_MS })
+        .catch((e) => { err = e; return null; }),
+      internetReachable(),
+    ]);
+  } finally {
+    net.probing = false;
+  }
+  if (!net.down) return;
+  net.checks++;
+  net.lastCheck = Date.now();
+  if (d) { connectionRestored(d); return; }
+  if (err instanceof NetError) {
+    net.kind     = err.kind;
+    net.reason   = err.message;
+    net.deniedBy = err.deniedBy;
+  }
+  net.where = net.kind === 'unreachable' ? (internetOk ? 'server' : 'internet') : null;
+  renderNetPrompt();
+  scheduleProbe(PROBE_EVERY_MS);
+}
+
+function connectionRestored(d) {
+  const notSaved = net.notSaved.slice();
+  const maybe    = net.maybe.slice();
+  net.down = false;
+  net.pollFails = 0;
+  clearTimeout(net.probeTimer);
+  document.getElementById('netPrompt').classList.remove('show');
+  document.getElementById('netPrompt').setAttribute('aria-hidden', 'true');
+  document.getElementById('refreshDot').classList.remove('down');
+  restoredBeep();
+  // Redraw everything from the probe's reply, even if it matches the cached
+  // copy: ticks made just before the drop were drawn optimistically, and only
+  // the server knows which of them landed.
+  if (d.success) {
+    previousOrdersJson = '';
+    applyOrders(d);
+  }
+  let msg = '✅ Connection restored — the picklist has been reloaded from the server.';
+  if (notSaved.length) msg += ' NOT saved, do again: ' + notSaved.join('; ') + '.';
+  if (maybe.length) {
+    msg += ' Check these — the connection dropped while saving: ' + maybe.join('; ') + '.';
+  }
+  showToast(msg, { ok: true, ms: (notSaved.length || maybe.length) ? 30000 : 8000 });
+}
+
+// Record a change the outage may have cost, for the window and the
+// restored notice. `err.notSent`: refused before it left, so certainly lost.
+function noteAffected(desc, err) {
+  const list = err.notSent ? net.notSaved : net.maybe;
+  if (!list.includes(desc)) list.push(desc);
+  renderNetPrompt();
+}
+
+function fmtClock(ms) { return new Date(ms).toLocaleTimeString(); }
+
+function renderNetPrompt() {
+  let title, body;
+  if (net.kind === 'refused') {
+    title = 'The server refused this computer';
+    body = 'The pantry server is reachable, but it refused this computer: “'
+         + net.reason + '.” A supervisor or administrator needs to check '
+         + 'Settings → Secure Network Access. This window lifts by itself once '
+         + 'the server accepts this computer again.';
+  } else if (net.where === 'internet') {
+    title = 'No internet connection';
+    body = (navigator.onLine === false
+             ? 'This computer is not connected to any network. '
+             : 'This computer can\'t reach the internet. ')
+         + 'Nothing can be saved until it can, and new orders won\'t appear. '
+         + 'Check the Wi-Fi or network cable, and that the pantry\'s router and '
+         + 'modem are working.';
+  } else if (net.where === 'server') {
+    title = 'The pantry server isn\'t responding';
+    body = 'This computer\'s internet connection is working, but the OpenPantry '
+         + 'server is not working (' + net.reason + '). This is a problem with '
+         + 'the hosting server, not the pantry\'s network — restarting the router '
+         + 'won\'t help. If it lasts more than a few minutes, contact whoever '
+         + 'looks after the OpenPantry website.';
+  } else {
+    title = 'Connection lost';
+    body = 'This computer can\'t reach the OpenPantry server (' + net.reason
+         + '). Checking whether it\'s the internet or the server…';
+  }
+  document.getElementById('netTitle').textContent = title;
+  document.getElementById('netBody').textContent  = body;
+
+  const parts = [];
+  if (net.notSaved.length) parts.push('NOT saved — do again once connected:\n' + net.notSaved.join('\n'));
+  if (net.maybe.length)    parts.push('May or may not have saved — check once connected:\n' + net.maybe.join('\n'));
+  const lost = document.getElementById('netLost');
+  lost.textContent = parts.join('\n\n');
+  lost.style.display = parts.length ? 'block' : 'none';
+
+  document.getElementById('netStatus').textContent = 'Stopped at ' + fmtClock(net.since)
+    + (net.checks ? ' · checked ' + net.checks + ' time' + (net.checks === 1 ? '' : 's')
+                    + ', last at ' + fmtClock(net.lastCheck) + ' — still down'
+                  : ' · checking…');
+}
+
+// Chrome reports the network adapter going away at once, which beats waiting
+// for a request to fail. 'online' isn't trustworthy — it fires when Wi-Fi
+// reconnects whether or not the internet came with it — so it only brings the
+// next probe forward; the probe decides.
+window.addEventListener('offline', () => {
+  connectionLost(new NetError('unreachable', 'this computer has no network connection'));
+});
+window.addEventListener('online', () => { if (net.down) scheduleProbe(0); });
+
+// ── Load orders from API ────────────────────────────────────────────
+// `manual`: the Refresh button. While the page is down it asks the probe to
+// check now instead, and a manual refresh that fails raises the window at
+// once rather than waiting for a second failure.
+let pollBusy = false;   // a slow refresh must not have the next one stacked on it
+
+async function loadOrders(manual) {
+  if (net.down) { if (manual) scheduleProbe(0); return; }
+  if (pollBusy) return;
+  pollBusy = true;
+  try {
+    const data = await apiFetch('../api.php?action=get_orders',
+                                { timeout: POLL_TIMEOUT_MS, escalate: false });
+    net.pollFails = 0;
     if (!data.success) throw new Error(data.error);
-    
+    applyOrders(data);
+  } catch(e) {
+    // This refresh is how an idle dashboard notices an outage before anyone
+    // ticks an item. One failure is a blip and the next refresh retries; two
+    // in a row (10–15s) raises the window. A refusal is never a blip.
+    if (e instanceof NetError) {
+      if (e.kind === 'refused' || manual || ++net.pollFails >= 2) connectionLost(e);
+      return;
+    }
+    showToast('⚠ Refresh failed: ' + e.message);
+  } finally {
+    pollBusy = false;
+  }
+}
+
+function applyOrders(data) {
     // Check if the server data is actually different from what we are showing
     const currentOrdersJson = JSON.stringify(data.orders);
     if (currentOrdersJson === previousOrdersJson) {
@@ -438,10 +828,6 @@ async function loadOrders() {
       const newItemsEl = document.getElementById('itemsContainer_' + activeOrderId);
       if (newItemsEl) newItemsEl.scrollTop = itemScroll;
     }
-
-  } catch(e) {
-    showToast('⚠ Refresh failed: ' + e.message);
-  }
 }
 
 // ── Render the sidebar queue ────────────────────────────────────────
@@ -599,6 +985,19 @@ function showEmpty() {
   panel.innerHTML = '';
 }
 
+// "Milk (2%) — Order #12, Smith", for the list of changes an outage affected.
+function describeItem(orderId, itemId, fallbackName) {
+  const order = orders.find(o => o.id == orderId);
+  const item  = order && (order.items || []).find(i => i.id == itemId);
+  const name  = item ? item.item_name + (item.item_detail ? ' (' + item.item_detail + ')' : '')
+                     : (fallbackName || 'item');
+  return name + ' — Order #' + orderId + (order ? ', ' + order.name : '');
+}
+function describeOrder(orderId) {
+  const order = orders.find(o => o.id == orderId);
+  return 'Order #' + orderId + (order ? ', ' + order.name : '');
+}
+
 // ── Toggle a single item ────────────────────────────────────────────
 async function toggleItem(itemId, orderId) {
   const el = document.getElementById('pi_' + itemId);
@@ -614,8 +1013,7 @@ async function toggleItem(itemId, orderId) {
     fd.append('action', 'toggle_item');
     fd.append('item_id', itemId);
     fd.append('completed', newVal);
-    const res  = await fetch('../api.php', {method:'POST', body: fd});
-    const data = await res.json();
+    const data = await apiFetch('../api.php', { body: fd });
     if (!data.success) throw new Error(data.error);
 
     // Update local order data
@@ -648,6 +1046,12 @@ async function toggleItem(itemId, orderId) {
     // Revert on error
     el.classList.toggle('picked', isPicked);
     el.querySelector('.pick-checkbox').textContent = isPicked ? '✓' : '';
+    // The window is already up and says why; list the tick instead. If it did
+    // land, the reload on reconnect puts the check mark back.
+    if (e instanceof NetError) {
+      noteAffected((newVal ? 'Tick ' : 'Untick ') + describeItem(orderId, itemId), e);
+      return;
+    }
     showToast('⚠ Error: ' + e.message);
   }
 }
@@ -659,8 +1063,7 @@ async function duplicateOrderItem(itemId, orderId, itemName, itemDetail, categor
     fd.append('action', 'duplicate_order_item');
     fd.append('item_id', itemId);
     fd.append('order_id', orderId);
-    const res  = await fetch('../api.php', {method:'POST', body: fd});
-    const data = await res.json();
+    const data = await apiFetch('../api.php', { body: fd });
     if (!data.success) throw new Error(data.error);
 
 	// Update local order data
@@ -691,6 +1094,10 @@ async function duplicateOrderItem(itemId, orderId, itemName, itemDetail, categor
 
     showToast('＋ "' + itemName + '" duplicated in order.');
   } catch(e) {
+    if (e instanceof NetError) {
+      noteAffected('Duplicate ' + describeItem(orderId, itemId, itemName), e);
+      return;
+    }
     showToast('⚠ Error: ' + e.message);
   }
 }
@@ -702,8 +1109,7 @@ async function removeOrderItem(itemId, orderId, itemName) {
     fd.append('action', 'remove_order_item');
     fd.append('item_id', itemId);
     fd.append('order_id', orderId);
-    const res  = await fetch('../api.php', {method:'POST', body: fd});
-    const data = await res.json();
+    const data = await apiFetch('../api.php', { body: fd });
     if (!data.success) throw new Error(data.error);
 
     // Remove the element from the DOM
@@ -740,6 +1146,10 @@ async function removeOrderItem(itemId, orderId, itemName) {
 
     showToast('✕ "' + itemName + '" removed from order.');
   } catch(e) {
+    if (e instanceof NetError) {
+      noteAffected('Remove ' + describeItem(orderId, itemId, itemName), e);
+      return;
+    }
     showToast('⚠ Error: ' + e.message);
   }
 }
@@ -751,8 +1161,7 @@ async function completeOrder(orderId) {
     const fd = new FormData();
     fd.append('action', 'complete_order');
     fd.append('order_id', orderId);
-    const res  = await fetch('../api.php', {method:'POST', body: fd});
-    const data = await res.json();
+    const data = await apiFetch('../api.php', { body: fd });
     if (!data.success) throw new Error(data.error);
 
     showToast('✅ Order completed!');
@@ -761,6 +1170,7 @@ async function completeOrder(orderId) {
     updateStats();
     showEmpty();
   } catch(e) {
+    if (e instanceof NetError) { noteAffected('Mark complete: ' + describeOrder(orderId), e); return; }
     showToast('⚠ Error: ' + e.message);
   }
 }
@@ -772,8 +1182,7 @@ async function deleteOrder(orderId) {
     const fd = new FormData();
     fd.append('action', 'delete_order');
     fd.append('order_id', orderId);
-    const res  = await fetch('../api.php', {method:'POST', body: fd});
-    const data = await res.json();
+    const data = await apiFetch('../api.php', { body: fd });
     if (!data.success) throw new Error(data.error);
 
     showToast('🗑 Order cancelled.');
@@ -782,6 +1191,7 @@ async function deleteOrder(orderId) {
     updateStats();
     showEmpty();
   } catch(e) {
+    if (e instanceof NetError) { noteAffected('Cancel ' + describeOrder(orderId), e); return; }
     showToast('⚠ Error: ' + e.message);
   }
 }
@@ -818,13 +1228,17 @@ function escHtml(str) {
   return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// opts.ok: the green connection-restored style; opts.ms: stay up longer
+// than the usual 3.5s.
 let toastTimer;
-function showToast(msg) {
+function showToast(msg, opts) {
+  opts = opts || {};
   const t = document.getElementById('toast');
   t.textContent = msg;
+  t.classList.toggle('ok', !!opts.ok);
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+  toastTimer = setTimeout(() => t.classList.remove('show'), opts.ms || 3500);
 }
 
 // ── Init ─────────────────────────────────────────────────────────────

@@ -278,9 +278,13 @@ function requireAllowedIPAPI(): void {
     if ($ipOk && $timeOk) return;
     http_response_code(403);
     header('Content-Type: application/json');
+    // `access_denied` marks this as the station-wide wall rather than one
+    // action being refused: the scan page stops the line and says which gate
+    // it hit, instead of reporting it as an ordinary failure on each item.
     echo json_encode([
-        'ok'    => false,
-        'error' => !$ipOk ? 'Network not allowed' : 'Outside permitted access hours',
+        'ok'            => false,
+        'access_denied' => !$ipOk ? 'network' : 'hours',
+        'error'         => !$ipOk ? 'Network not allowed' : 'Outside permitted access hours',
     ]);
     exit;
 }

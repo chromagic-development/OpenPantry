@@ -1060,8 +1060,12 @@ renderNav('settings');
        A bare button rather than a card: it opens a page of its own, so there
        is nothing here to set. What the tool does lives in its tooltip and on
        the page it opens. Administrator-only — a supervisor sees it disabled
-       so the tool stays discoverable from here. -->
-  <div style="margin-bottom:20px;">
+       so the tool stays discoverable from here.
+
+       Monitor Uptime sits beside it: also a page of its own, open to either
+       login, and opened in the same tab like Consolidate Names. Its own
+       Settings button brings the operator back here. -->
+  <div style="margin-bottom:20px; display:flex; gap:10px; flex-wrap:wrap;">
     <?php if ($isSupervisor): ?>
       <button type="button" class="btn btn-secondary" disabled
               title="Sign in with the administrator password to consolidate names">🔀 Consolidate Names</button>
@@ -1070,6 +1074,9 @@ renderNav('settings');
          style="text-decoration:none;"
          title="Merge duplicate spellings of the same item, and clear out inventory rows nothing points at any more">🔀 Consolidate Names</a>
     <?php endif; ?>
+    <a class="btn btn-secondary" href="../monitor.php"
+       style="text-decoration:none;"
+       title="Open a dashboard that watches the server and both order databases, alerts when they can't be reached, and logs every outage and recovery">📡 Monitor Uptime</a>
   </div>
 </div>
 <script>

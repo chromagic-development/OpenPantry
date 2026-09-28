@@ -297,6 +297,35 @@ renderHead('Scan');
     </div>
   </div>
 
+  <!-- ── Connection-lost window ───────────────────────────────────────────
+       Raised by connectionLost() the moment a request can't reach the server
+       (or the server's network wall turns this station away), and lowered by
+       the recovery probe on its own — there is nothing here for the operator
+       to press, because the only fix is waiting or fixing the network. The
+       falling notes sound once, when it opens. Topmost of all the windows: a held weight or an open recall is
+       still there underneath when it lifts, but nothing behind it can be
+       saved until it does. -->
+  <div id="netPrompt" class="wt-overlay net-overlay" style="display:none;" aria-hidden="true">
+    <div class="wt-modal net-modal" role="alertdialog" aria-modal="true"
+         aria-labelledby="netTitle" aria-describedby="netBody">
+      <div class="wt-header net-header">
+        <div id="netEyebrow" class="wt-eyebrow">⚠ Connection problem — stop scanning</div>
+        <h2 id="netTitle" class="wt-title">Connection lost</h2>
+      </div>
+      <div class="wt-body">
+        <p id="netBody" class="net-body"></p>
+        <div id="netLost" class="net-lost" style="display:none;"></div>
+        <p class="wt-hint">
+          This page is checking the connection every few seconds and will tell
+          you, with a rising chime, when you can scan again. Scans made while
+          this window is up are refused with a buzz and are
+          <strong>not</strong> recorded.
+        </p>
+        <div id="netStatus" class="net-status"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Weight-entry modal (blocks the operator until they save or cancel) ── -->
   <div id="weightPrompt" class="wt-overlay" style="display:none;" aria-hidden="true">
     <div class="wt-modal" role="dialog" aria-modal="true" aria-labelledby="wtTitle">
@@ -441,6 +470,20 @@ renderHead('Scan');
       0%, 100% { box-shadow: 0 20px 60px rgba(0,0,0,.35), 0 0 0 0 rgba(177,69,42,.55); }
       50%      { box-shadow: 0 20px 60px rgba(0,0,0,.35), 0 0 0 14px rgba(177,69,42,0); }
     }
+    /* ── Connection-lost window ── */
+    /* Above the recall window: while the server can't be reached nothing
+       behind this can be saved, a recall acknowledgement included. */
+    .net-overlay { z-index: 10001; background: rgba(40, 8, 0, .80); }
+    .net-modal { border: 3px solid var(--red); }
+    .net-header { background: #F8D7DA; border-bottom: 1px solid #F1AEB5; }
+    .net-header .wt-eyebrow, .net-header .wt-title { color: #8B1A1A; }
+    .net-header .wt-title { font-size: 1.7rem; }
+    .net-body { font-size: 1.05rem; color: #333; line-height: 1.45; }
+    .net-lost { margin-top: 14px; padding: 10px 14px; border-radius: 8px;
+                background: #FFF3CD; border: 1px solid #FFE69C; color: #806000;
+                font-weight: 700; }
+    .net-status { margin: 12px 0 18px; font-size: .8rem; color: #777;
+                  font-family: monospace; }
     .recall-item { font-size: 1.5rem; font-weight: 800; color: var(--brown); }
     .recall-meta { font-family: monospace; font-size: .85rem; color: #777; margin-top: 4px; }
 
@@ -456,6 +499,9 @@ renderHead('Scan');
        will accept it. */
     .nm-row.nm-unique { background: rgba(139,175,58,.14); }
     .nm-name { font-weight: 700; color: var(--brown); }
+    /* Top match at 2× size — a big, easy tap target (name and PLU lists). */
+    #nameMatches .nm-row:first-child .nm-name,
+    #pluMatches .nm-row:first-child .nm-name { font-size: 2em; line-height: 1.1; }
     .nm-brand { font-size: .75rem; color: #777; }
     .nm-code { font-family: monospace; color: #777; margin-left: auto; }
     .nm-hint { padding: 8px 14px; font-size: .75rem; color: #777;
@@ -736,6 +782,8 @@ const MY_STATION = <?= json_encode($myStation) ?>;
 //   ignoreBeep() — rising swoop: unknown UPC skipped, nothing to do.
 //   alarmBeep()  — repeating two-tone siren: a recalled item was scanned.
 //   readyBeep()  — soft short tick: platform clear, take the next item.
+//   lostBeep()   — three long falling notes: the server can't be reached.
+//   restoredBeep() — the same three notes rising: connection back, carry on.
 let audioCtx = null;
 
 // Chrome will not let an AudioContext start until the page has seen a real
@@ -842,6 +890,19 @@ function alarmBeep() {
   }
   playTones(tones, 0.45);
 }
+// Three long falling notes, a "power-down": the server can't be reached. Slower
+// and lower than the recall siren, since it asks the operator to stop and wait
+// rather than to act on the package in hand, and longer than errorBeep()'s
+// two-note buzz so it can't be heard as one more rejected item.
+function lostBeep() {
+  playTones([[0, 784, 0.30], [0.36, 587, 0.30], [0.72, 392, 0.55]], 0.40);   // G5 D5 G4
+}
+// The same three steps climbing, in the rounder triangle voice the ready tick
+// uses: the connection is back and scanning can resume.
+function restoredBeep() {
+  playTones([[0, 523, 0.16, 'triangle'], [0.18, 659, 0.16, 'triangle'],
+             [0.36, 784, 0.34, 'triangle']], 0.55);                          // C5 E5 G5
+}
 
 const $ = (id) => document.getElementById(id);
 const barcodeInput = $('barcodeInput');
@@ -893,20 +954,338 @@ setInterval(() => {
 // site so a new endpoint can't forget to opt in.
 let inFlight = 0;
 
-async function postJson(url, body) {
-  const isSync = body && body.action === 'sync';
+// ── Connection watch ─────────────────────────────────────────────────────
+// Every request goes through postJson(), so this is where an outage is caught.
+// Without it a dead connection was silent: a failed fetch threw past every
+// caller into the console, and a stalled one (Wi-Fi up, internet down) never
+// settled at all — each scan quietly queued another request that went nowhere,
+// with no banner and no buzz, and the barcode field already cleared.
+//
+// Now any request that can't get an answer out of the server stops the line:
+// the connection-lost window goes up with its own sound, scans are refused
+// with a buzz until it lifts, and a probe asks the server every few seconds
+// until it answers. "Answer" means a JSON reply of any status — a 500 carrying
+// {ok:false} is the app refusing one action, which callers already report.
+// A failed connection, a timeout, or anything that isn't JSON (a host error
+// page, CloudLinux's 508, a Wi-Fi login page) is an outage. So is the
+// network-wall 403 (access_denied): the server is fine, but it will refuse
+// every scan this station makes until someone changes Settings or the hours
+// open, so it gets the same window with its own explanation.
+const NET_TIMEOUT_MS   = 8000;    // scans, lookups, records, everything ordinary
+const SYNC_TIMEOUT_MS  = 5000;    // the background team-sync poll
+const AI_TIMEOUT_MS    = 90000;   // api_kitchen waits on an AI model
+const PROBE_EVERY_MS   = 3000;    // recovery check cadence while down
+const PROBE_TIMEOUT_MS = 5000;
+
+// Raised by postJson() for every outage, so a caller can tell "the connection
+// is gone" from an ordinary {ok:false}. `action` is the API action that failed,
+// which decides whether an item is known lost or only possibly lost.
+class NetError extends Error {
+  constructor(kind, message, action, extra) {
+    super(message);
+    this.name     = 'NetError';
+    this.kind     = kind;        // 'unreachable' | 'refused'
+    this.action   = action || null;
+    this.timedOut = !!(extra && extra.timedOut);
+    this.deniedBy = (extra && extra.deniedBy) || null;   // 'network' | 'hours'
+    // Refused here because the line was already down: never left the page,
+    // so whatever it was carrying certainly wasn't saved.
+    this.notSent  = !!(extra && extra.notSent);
+  }
+}
+
+const net = {
+  down:      false,
+  kind:      null,     // 'unreachable' | 'refused'
+  where:     null,     // unreachable only: 'internet' | 'server' | null (still checking)
+  reason:    '',       // what failed, in words
+  deniedBy:  null,     // refused only: 'network' | 'hours'
+  since:     0,        // ms timestamp the line stopped
+  checks:    0,        // probes made during this outage
+  lastCheck: 0,
+  notRecorded: [],     // barcodes known not to have been saved
+  maybe:       [],     // barcodes whose save may or may not have landed
+  probing:   false,
+  probeTimer: null,
+  syncFails:  0,       // consecutive failed polls (one is a blip, two an outage)
+};
+
+// opts.timeout   — override the default timeout
+// opts.escalate  — false: throw NetError without raising the window (the
+//                  sync poll decides for itself; the probe is already in it)
+// opts.probe     — the recovery probe: allowed through while the line is down
+// opts.soft      — a timeout alone isn't an outage (the AI calls, which can
+//                  simply be slow); a failed connection still is
+async function postJson(url, body, opts) {
+  opts = opts || {};
+  const action = (body && body.action) || null;
+  const isSync = action === 'sync';
+  // While the line is stopped, nothing but the probe talks to the server:
+  // letting requests pile up behind a dead connection is what used to make
+  // the page look frozen, and each one would land in a heap on reconnect.
+  if (net.down && !opts.probe) {
+    throw new NetError(net.kind, 'The connection is down', action, { notSent: true });
+  }
+  const timeoutMs = opts.timeout || (isSync ? SYNC_TIMEOUT_MS : NET_TIMEOUT_MS);
   if (!isSync) inFlight++;
   try {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
-    });
-    return await r.json();
+    let r, text;
+    try {
+      r = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await r.text();
+    } catch (e) {
+      const timedOut = !!e && e.name === 'TimeoutError';
+      throw new NetError('unreachable',
+        timedOut ? 'no reply within ' + Math.round(timeoutMs / 1000) + ' seconds'
+                 : 'the connection failed',
+        action, { timedOut });
+    }
+    let d;
+    try { d = JSON.parse(text); } catch (e) {
+      throw new NetError('unreachable', 'it returned an error page, HTTP ' + r.status, action);
+    }
+    if (d && d.access_denied) {
+      throw new NetError('refused', d.error || 'Access denied', action, { deniedBy: d.access_denied });
+    }
+    return d;
+  } catch (e) {
+    if (e instanceof NetError && !opts.probe && opts.escalate !== false
+        && !(opts.soft && e.timedOut)) {
+      connectionLost(e);
+    }
+    throw e;
   } finally {
     if (!isSync) inFlight--;
   }
 }
+
+// Callers that don't catch a NetError (End, Cancel, the name search, the ✕)
+// have nothing left to do once the window is up, so their rejection is
+// expected rather than a bug — keep it out of the console.
+window.addEventListener('unhandledrejection', (e) => {
+  if (e.reason instanceof NetError) e.preventDefault();
+});
+
+// Stop the line. Safe to call again while already down: a refusal arriving
+// after an unreachable (or the reverse) just updates what the window says.
+function connectionLost(err) {
+  if (net.down) {
+    if (err.kind !== net.kind) {
+      net.kind = err.kind;
+      net.reason = err.message;
+      net.deniedBy = err.deniedBy;
+      renderNetPrompt();
+    }
+    return;
+  }
+  Object.assign(net, {
+    down: true, kind: err.kind, reason: err.message, deniedBy: err.deniedBy,
+    where: err.kind === 'unreachable' && navigator.onLine === false ? 'internet' : null,
+    since: Date.now(), checks: 0, lastCheck: 0,
+    notRecorded: [], maybe: [], syncFails: 0,
+  });
+  const m = $('netPrompt');
+  m.style.display = 'flex';
+  m.setAttribute('aria-hidden', 'false');
+  renderNetPrompt();
+  lostBeep();   // once per outage — the window, not the sound, carries it after that
+  // Work out straight away whether it's this station's internet or the server,
+  // rather than leaving "checking…" up for a whole probe interval.
+  if (net.kind === 'unreachable' && net.where === null) {
+    internetReachable().then((ok) => {
+      if (net.down && net.kind === 'unreachable' && net.where === null) {
+        net.where = ok ? 'server' : 'internet';
+        renderNetPrompt();
+      }
+    });
+  }
+  scheduleProbe(PROBE_EVERY_MS);
+}
+
+// Is the wider internet up? Asked only once the pantry server has failed, to
+// tell a volunteer whether the problem is at their end. Two well-known hosts
+// raced: Google's connectivity-check URL (the one Chrome itself uses) and the
+// CDN this page already loads its camera library from. no-cors: the answer is
+// opaque and unreadable, but that it arrived at all is the whole question.
+async function internetReachable() {
+  if (navigator.onLine === false) return false;
+  const ping = (u) => fetch(u, { mode: 'no-cors', cache: 'no-store',
+                                 signal: AbortSignal.timeout(4000) });
+  try {
+    await Promise.any([
+      ping('https://www.gstatic.com/generate_204'),
+      ping('https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/package.json'),
+    ]);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function scheduleProbe(ms) {
+  clearTimeout(net.probeTimer);
+  net.probeTimer = setTimeout(probe, ms);
+}
+
+// One recovery check: the same sync call the poll makes, so a success also
+// hands back the server's own record of this order to redraw from. The
+// internet check runs alongside it, so a failed probe can say which side of
+// the connection is at fault without waiting another round.
+async function probe() {
+  net.probeTimer = null;
+  if (!net.down || net.probing) return;
+  net.probing = true;
+  let d = null, err = null, internetOk = null;
+  try {
+    [d, internetOk] = await Promise.all([
+      postJson('../api_order.php', {action: 'sync'}, {probe: true, timeout: PROBE_TIMEOUT_MS})
+        .catch((e) => { err = e; return null; }),
+      internetReachable(),
+    ]);
+  } finally {
+    net.probing = false;
+  }
+  if (!net.down) return;
+  net.checks++;
+  net.lastCheck = Date.now();
+  if (d) { connectionRestored(d); return; }
+  if (err instanceof NetError) {
+    net.kind     = err.kind;
+    net.reason   = err.message;
+    net.deniedBy = err.deniedBy;
+  }
+  net.where = net.kind === 'unreachable' ? (internetOk ? 'server' : 'internet') : null;
+  renderNetPrompt();
+  scheduleProbe(PROBE_EVERY_MS);
+}
+
+function connectionRestored(d) {
+  const lost  = net.notRecorded.slice();
+  const maybe = net.maybe.slice();
+  net.down = false;
+  net.syncFails = 0;
+  clearTimeout(net.probeTimer);
+  const m = $('netPrompt');
+  m.style.display = 'none';
+  m.setAttribute('aria-hidden', 'true');
+  restoredBeep();
+  // Redraw from the probe's reply: it is the server's own list of what landed
+  // on this order, which is exactly what the operator now needs to check. Not
+  // while a request is still settling (it would append its row on top of the
+  // redraw) — then the next poll redraws instead.
+  if (d.ok && inFlight === 0) applySync(d);
+  else lastFingerprint = null;
+  let msg = 'Connection restored — you can scan again.';
+  if (lost.length) {
+    msg += ' NOT recorded, scan again: ' + lost.join(', ') + '.';
+  }
+  if (maybe.length) {
+    msg += ' Check This Order for ' + maybe.join(', ')
+         + ' — the connection dropped while saving, so scan it again only if it is not listed.';
+  }
+  flash(msg, 'info', { style: 'success', ms: (lost.length || maybe.length) ? 30000 : 10000 });
+  refocus();
+}
+
+// Record a barcode the outage cost. `maybe`: the save request itself failed,
+// so it may have reached the server before the reply was lost — the operator
+// must check rather than re-scan blind, or the item is counted twice.
+function noteLostItem(code, maybe) {
+  if (!code || /^99000[1-3]$/.test(code)) return;   // command codes aren't items
+  const list = maybe ? net.maybe : net.notRecorded;
+  if (!list.includes(code)) list.push(code);
+  showLast(maybe ? '⚠ May not have saved — connection lost' : '⚠ NOT RECORDED — connection lost',
+           code, maybe ? 'check This Order after reconnecting' : 'scan again after reconnecting');
+  renderNetPrompt();
+}
+
+// A scan while the line is stopped: refused outright, never queued.
+function refuseWhileDown(code) {
+  errorBeep();
+  noteLostItem(code, false);
+}
+
+function fmtClock(ms) { return new Date(ms).toLocaleTimeString(); }
+
+function renderNetPrompt() {
+  let title, body;
+  if (net.kind === 'refused') {
+    title = 'The server refused this station';
+    body = net.deniedBy === 'hours'
+      ? 'The pantry server is reachable, but it refused this station: “'
+        + net.reason + '.” Scanning is closed outside the Allowed Hours set in '
+        + 'Settings. This window lifts by itself when the permitted hours begin, '
+        + 'or an administrator can change the hours.'
+      : 'The pantry server is reachable, but it refused this station: “'
+        + net.reason + '.” The pantry\'s internet address has probably changed '
+        + '— this often happens after the router or internet service restarts. '
+        + 'A supervisor or administrator needs to update Settings → Secure '
+        + 'Network Access with the new address. This window lifts by itself once '
+        + 'they do.';
+  } else if (net.where === 'internet') {
+    title = 'No internet connection';
+    body = (navigator.onLine === false
+             ? 'This computer is not connected to any network. '
+             : 'This station can\'t reach the internet. ')
+         + 'Nothing can be saved until it can. Check the Wi-Fi or network cable, '
+         + 'and that the pantry\'s router and modem are working.';
+  } else if (net.where === 'server') {
+    title = 'The pantry server isn\'t responding';
+    body = 'This station\'s internet connection is working, but the OpenPantry '
+         + 'server is not working (' + net.reason + '). This is a problem with '
+         + 'the hosting server, not the pantry\'s network — restarting the router '
+         + 'won\'t help. If it lasts more than a few minutes, contact whoever '
+         + 'looks after the OpenPantry website.';
+  } else {
+    title = 'Connection lost';
+    body = 'This station can\'t reach the OpenPantry server (' + net.reason
+         + '). Checking whether it\'s the internet or the server…';
+  }
+  $('netTitle').textContent = title;
+  $('netBody').textContent  = body;
+
+  const parts = [];
+  if (net.notRecorded.length) {
+    parts.push('NOT recorded — set aside and scan again once connected: '
+             + net.notRecorded.join(', '));
+  }
+  if (net.maybe.length) {
+    parts.push('May or may not have been saved — check This Order once connected: '
+             + net.maybe.join(', '));
+  }
+  $('netLost').textContent = parts.join('\n');
+  $('netLost').style.whiteSpace = 'pre-line';
+  $('netLost').style.display = parts.length ? 'block' : 'none';
+
+  $('netStatus').textContent = 'Stopped at ' + fmtClock(net.since)
+    + (net.checks ? ' · checked ' + net.checks + ' time' + (net.checks === 1 ? '' : 's')
+                    + ', last at ' + fmtClock(net.lastCheck) + ' — still down'
+                  : ' · checking…');
+}
+
+// Backdrop click does nothing: the window lifts when the connection is back.
+$('netPrompt').addEventListener('click', (e) => {
+  if (e.target === $('netPrompt')) e.stopPropagation();
+});
+// Chrome reports the network adapter going away at once, which beats waiting
+// for a request to fail. The reverse isn't trustworthy — 'online' fires when
+// Wi-Fi reconnects whether or not the internet came with it — so it only
+// brings the next probe forward; the probe decides.
+window.addEventListener('offline', () => {
+  connectionLost(new NetError('unreachable', 'this computer has no network connection', null));
+});
+window.addEventListener('online', () => { if (net.down) scheduleProbe(0); });
+
+// One 'start' at a time. Several quick scans on an idle station each reach
+// here before the first reply comes back; without this, each asked the server
+// for an order of its own. The later ones wait on the first one's answer.
+let startingOrder = null;
 
 async function startOrderIfNeeded() {
   // Non-null while assisting too, so a helper's scans go to the shared order
@@ -918,13 +1297,18 @@ async function startOrderIfNeeded() {
   // refuses 'start' in this state anyway; this turns that refusal into the
   // join the operator meant.
   if (state.assistMode) return await joinNextOrderToAssist();
-  const r = await postJson('../api_order.php', {action:'start'});
-  if (!r.ok) { flash('Could not start order: ' + (r.error || 'unknown'), 'error'); return false; }
-  state.orderId = r.order_id;
-  $('assistCard').style.display = 'none';   // this station is no longer free
-  applyRole('owner', r.order_id, r.started_at, 0);
-  resetTable();
-  return true;
+  if (!startingOrder) {
+    startingOrder = (async () => {
+      const r = await postJson('../api_order.php', {action:'start'});
+      if (!r.ok) { flash('Could not start order: ' + (r.error || 'unknown'), 'error'); return false; }
+      state.orderId = r.order_id;
+      $('assistCard').style.display = 'none';   // this station is no longer free
+      applyRole('owner', r.order_id, r.started_at, 0);
+      resetTable();
+      return true;
+    })().finally(() => { startingOrder = null; });
+  }
+  return await startingOrder;
 }
 
 // After ending or cancelling, reload the page so the "This Order" table and
@@ -1058,24 +1442,17 @@ function onCameraDecode(text) {
 
 // ── AI kitchen help: recipe from the order / prep tips per item ──────────
 // Both features fetch text from api_kitchen.php and route it to the printer
-// via a print-formatted popup window. The window must be opened synchronously
-// in the click handler (popup blockers reject async window.open), so it shows
-// a "working" note until the AI text arrives, then triggers the print dialog.
-function openPrintWindow(title) {
-  const w = window.open('', '_blank');
-  if (!w) {
-    flash('Popup blocked — allow popups for this site so the printout can open.', 'error');
-    return null;
-  }
-  w.document.write('<!doctype html><title>' + escape(title) + '</title>'
-    + '<body style="font:16px Georgia,serif; padding:40px; color:#333;">'
-    + 'Asking the AI… this can take a few seconds.</body>');
-  w.document.close();
-  return w;
-}
-
-function printText(w, title, text) {
-  if (w.closed) return;  // operator closed the tab while waiting
+// through a hidden iframe on this page, so no tab or window opens and the
+// maximized scan page keeps focus. The browser's print dialog still appears
+// unless the station's browser runs with --kiosk-printing.
+function printText(title, text) {
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  // Zero-size rather than display:none — some browsers print a blank page
+  // from an undisplayed frame.
+  frame.style.cssText = 'position:fixed; right:0; bottom:0; width:0; height:0; border:0;';
+  document.body.appendChild(frame);
+  const w = frame.contentWindow;
   w.document.open();
   w.document.write('<!doctype html><html><head><title>' + escape(title) + '</title><style>'
     + 'body { font: 15px/1.6 Georgia, serif; color: #222; margin: 40px auto; max-width: 680px; }'
@@ -1090,26 +1467,34 @@ function printText(w, title, text) {
     + '<div class="foot">AI-generated suggestion — use your judgment on quantities and cooking times.</div>'
     + '</body></html>');
   w.document.close();
-  w.focus();
+  // The dialog closing (printed or cancelled) is when the barcode field can
+  // take focus back; the frame is single-use, so drop it then too.
+  w.addEventListener('afterprint', () => {
+    setTimeout(() => frame.remove(), 0);
+    refocus();
+  }, {once: true});
   // Same-origin about:blank renders synchronously after close(); the short
   // delay just lets fonts/layout settle before the print dialog opens.
-  setTimeout(() => { try { w.print(); } catch (e) { /* window closed */ } }, 300);
+  setTimeout(() => {
+    try { w.print(); } catch (e) { frame.remove(); refocus(); }
+  }, 300);
 }
 
 $('btnRecipe').addEventListener('click', async () => {
   if (!state.orderId) { flash('No open order — scan items first.', 'info'); return; }
-  const w = openPrintWindow('Recipe Suggestion');
-  if (!w) return;
   const btn = $('btnRecipe');
+  const label = btn.textContent;
   btn.disabled = true;
+  btn.textContent = '⏳ Asking the AI…';
   try {
-    const r = await postJson('../api_kitchen.php', {action: 'recipe'});
-    if (!r.ok) { w.close(); flash(r.error || 'Could not get a recipe', 'error'); return; }
-    printText(w, 'Recipe Suggestion — Order #' + r.order_id, r.text);
+    const r = await postJson('../api_kitchen.php', {action: 'recipe'},
+                             {timeout: AI_TIMEOUT_MS, soft: true});
+    if (!r.ok) { flash(r.error || 'Could not get a recipe', 'error'); return; }
+    printText('Recipe Suggestion — Order #' + r.order_id, r.text);
   } catch (e) {
-    w.close();
     flash('Recipe request failed: ' + e.message, 'error');
   } finally {
+    btn.textContent = label;
     btn.disabled = false;
     refocus();
   }
@@ -1122,14 +1507,13 @@ $('scanTable').addEventListener('click', async (e) => {
   if (!a) return;
   e.preventDefault();
   const name = a.dataset.name;
-  const w = openPrintWindow('How to Prepare & Serve');
-  if (!w) return;
+  flash('Asking the AI how to prepare ' + name + '…', 'info');
   try {
-    const r = await postJson('../api_kitchen.php', {action: 'prepare', generic_name: name});
-    if (!r.ok) { w.close(); flash(r.error || 'Could not get preparation tips', 'error'); return; }
-    printText(w, 'How to Prepare & Serve: ' + name, r.text);
+    const r = await postJson('../api_kitchen.php', {action: 'prepare', generic_name: name},
+                             {timeout: AI_TIMEOUT_MS, soft: true});
+    if (!r.ok) { flash(r.error || 'Could not get preparation tips', 'error'); return; }
+    printText('How to Prepare & Serve: ' + name, r.text);
   } catch (e2) {
-    w.close();
     flash('Preparation-tips request failed: ' + e2.message, 'error');
   } finally {
     refocus();
@@ -2224,7 +2608,22 @@ async function tryAcceptPluName(q) {
   pluInput.focus();
 }
 
+// Every scan comes through here — the barcode field, the camera, the PLU window
+// and the add-by-name list — so this is the one place an outage is turned into
+// "which item was lost". scanItem() below does the actual work.
 async function handleScan(code) {
+  if (net.down) { refuseWhileDown(code); return; }
+  try {
+    await scanItem(code);
+  } catch (e) {
+    if (!(e instanceof NetError)) throw e;
+    // A failed 'record' may have landed before its reply was lost; anything
+    // earlier (start, lookup) certainly wrote nothing for this item.
+    noteLostItem(code, e.action === 'record' && !e.notSent);
+  }
+}
+
+async function scanItem(code) {
   // Reserved command barcode: 990001 acts as the End Order trigger so the
   // operator can finish an order without touching the screen.
   if (code === '990001') {
@@ -2321,9 +2720,18 @@ async function handleScan(code) {
     if (state.pendingWeight !== null) {
       const w = state.pendingWeight;
       closePluModal();   // shut first: no second scan can land mid-save
-      const rec = await postJson('../api_scan.php', {
-        action: 'record', barcode: code, weight_lbs: w,
-      });
+      let rec;
+      try {
+        rec = await postJson('../api_scan.php', {
+          action: 'record', barcode: code, weight_lbs: w,
+        });
+      } catch (e) {
+        // Unlike a refused save, a lost connection leaves it unknown whether
+        // this landed, so the weight is released rather than held for a retry
+        // that could record the item twice. handleScan() lists it to check.
+        if (e instanceof NetError && !e.notSent) state.pendingWeight = null;
+        throw e;
+      }
       if (!rec.ok) {
         // Keep the weight and put the window back, so a failed save costs a
         // retry rather than a trip back to the scale.
@@ -2646,12 +3054,25 @@ $('nameSubmit').addEventListener('click', async () => {
   const generic = capitalizeWords($('nameGeneric').value.trim());
   if (!generic) { $('nameGeneric').focus(); return; }
   const brand = capitalizeWords($('nameBrand').value.trim());
-  const rec = await postJson('../api_scan.php', {
-    action: 'record',
-    barcode: state.pendingUnknownUPC.barcode,
-    brand_name: brand,
-    generic_name: generic,
-  });
+  const barcode = state.pendingUnknownUPC.barcode;
+  let rec;
+  try {
+    rec = await postJson('../api_scan.php', {
+      action: 'record',
+      barcode: barcode,
+      brand_name: brand,
+      generic_name: generic,
+    });
+  } catch (e) {
+    if (!(e instanceof NetError)) throw e;
+    // Pressed while the line was down: nothing was sent, so leave the window
+    // and its typed names up for a Save once the connection is back.
+    if (e.notSent) { errorBeep(); return; }
+    // May or may not have saved — close rather than invite a second Save.
+    closeNameModal();
+    noteLostItem(barcode, true);
+    return;
+  }
   closeNameModal();
   afterRecord(rec);
   refocus();
@@ -2733,9 +3154,24 @@ async function submitWeight() {
     $('weightInput').focus();
     return;
   }
-  const rec = await postJson('../api_scan.php', {
-    action: 'record', barcode: state.pendingProduce.barcode, weight_lbs: w,
-  });
+  const barcode = state.pendingProduce.barcode;
+  let rec;
+  try {
+    rec = await postJson('../api_scan.php', {
+      action: 'record', barcode: barcode, weight_lbs: w,
+    });
+  } catch (e) {
+    if (!(e instanceof NetError)) throw e;
+    if (e.notSent) { errorBeep(); return; }   // never sent — Save again once connected
+    // Same as the name window: unknown whether it landed, so don't leave Save
+    // Weight sitting there to be pressed a second time.
+    state.pendingProduce = null;
+    state.weightDigits = '';
+    state.weightDecimal = null;
+    closeWeightModal();
+    noteLostItem(barcode, true);
+    return;
+  }
   state.pendingProduce = null;
   state.weightDigits = '';
   state.weightDecimal = null;
@@ -2901,7 +3337,9 @@ function escape(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<'
 // opts lets a caller keep the 'error' handling — the cleared barcode field and
 // the routing into the PLU window — while replacing the parts that say
 // something went wrong: opts.beep swaps the buzz, opts.style swaps the banner
-// color. For a message that is informational rather than a fault.
+// color. For a message that is informational rather than a fault. opts.ms
+// keeps the banner up longer than the usual 4s, for a message that has to
+// survive the operator looking away (the connection-restored notice).
 function flash(msg, kind, opts) {
   opts = opts || {};
   // With the PLU window up, a banner would render behind its dark overlay.
@@ -2926,7 +3364,7 @@ function flash(msg, kind, opts) {
   b.className = 'banner ' + (opts.style || kind || 'info');
   b.textContent = msg;
   $('scanCard').prepend(b);
-  setTimeout(() => b.remove(), 4000);
+  setTimeout(() => b.remove(), opts.ms || 4000);
 }
 
 // ── Team scanning: assist another station, and stay in sync with it ─────────
@@ -3053,16 +3491,32 @@ function applySync(d) {
   redrawScans(d.scans, d.scan_count);
 }
 
+let syncBusy = false;   // a slow poll must not have the next one stacked on it
+
 async function syncTick() {
+  // While the line is stopped the recovery probe does the polling.
+  if (net.down || syncBusy) return;
   // Never redraw under an open modal or a request that owns the table.
   if (inFlight > 0 || modalOpen()) return;
   // Mid-flow client state the operator would lose to a redraw: a held scale
   // weight, or a produce item waiting on its weight.
   if (state.pendingWeight !== null || state.pendingProduce) return;
   let d;
+  syncBusy = true;
   try {
-    d = await postJson('../api_order.php', {action:'sync'});
-  } catch (e) { return; }  // transient network blip — the next tick retries
+    d = await postJson('../api_order.php', {action:'sync'}, {escalate: false});
+    net.syncFails = 0;
+  } catch (e) {
+    // This poll is how an idle station notices an outage before anyone scans
+    // into it. One failure is a blip and the next tick retries; two in a row
+    // (5–15s) stops the line. A refusal is never a blip.
+    if (e instanceof NetError && (e.kind === 'refused' || ++net.syncFails >= 2)) {
+      connectionLost(e);
+    }
+    return;
+  } finally {
+    syncBusy = false;
+  }
   if (!d || !d.ok) return;
   // Re-check the guards: they may have changed during the round trip.
   if (inFlight > 0 || modalOpen()) return;
@@ -3157,7 +3611,13 @@ async function joinNextOrderToAssist() {
 // what the station will do is worse than no switch.
 $('beepSwitch').addEventListener('change', async (e) => {
   const on = e.target.checked;
-  const r = await postJson('../api_order.php', {action:'scan_beep', on: on});
+  let r = null;
+  try {
+    r = await postJson('../api_order.php', {action:'scan_beep', on: on});
+  } catch (err) {
+    e.target.checked = !on;   // the connection window already says why
+    return;
+  }
   if (!r || !r.ok) {
     e.target.checked = !on;
     flash('Could not save the beep setting', 'error');

@@ -34,17 +34,35 @@ $db = getDB();
 date_default_timezone_set('America/New_York');
 
 // ── Inputs ────────────────────────────────────────────────────────────────
-// A year is the natural reporting window: it covers a full seasonal cycle and
-// matches how grant periods are written.
-$defaultEnd   = date('Y-m-d');
-$defaultStart = date('Y-m-01', strtotime('-11 months'));
+// Start Date is sticky, the same way as the Volume report: the last one the
+// report was run with is kept in a cookie and becomes the default next visit.
+// Only an explicit submission writes it, and Reset clears it. With nothing
+// saved, the window opens on the first of the prior month.
+define('IR_START_COOKIE', 'fp_impact_start');
 
 // Anything that isn't a real Y-m-d falls back to the default rather than
-// reaching SQL or strtotime() as garbage.
+// reaching SQL or strtotime() as garbage. The cookie is user-controlled too.
 function opImpactDate(?string $v, string $fallback): string {
     if (!is_string($v) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) return $fallback;
     [$y, $m, $d] = array_map('intval', explode('-', $v));
     return checkdate($m, $d, $y) ? $v : $fallback;
+}
+
+// Must run before any output — this both clears a cookie and redirects.
+if (isset($_GET['reset'])) {
+    @setcookie(IR_START_COOKIE, '', time() - 3600, '/');
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+    exit;
+}
+
+$defaultEnd   = date('Y-m-d');
+$defaultStart = opImpactDate($_COOKIE[IR_START_COOKIE] ?? null,
+                             date('Y-m-d', strtotime('first day of last month')));
+
+$userStart = opImpactDate($_GET['date_start'] ?? null, '');
+if ($userStart !== '') {
+    @setcookie(IR_START_COOKIE, $userStart, time() + 365 * 24 * 3600, '/');
+    $_COOKIE[IR_START_COOKIE] = $userStart;
 }
 // Assumption inputs are clamped to a sane band so a stray keystroke can't
 // produce a headline number off by three orders of magnitude.
@@ -461,11 +479,61 @@ foreach ($topStmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
 usort($topRows, function ($a, $b) { return $b['est_lbs'] <=> $a['est_lbs']; });
 $topN = array_slice($topRows, 0, 15);
 
-// Produce only, for the fresh-produce chart. The Top Items Detail table below
-// still reports the overall top 15 across all three categories.
-$topProduce = array_slice(array_values(array_filter($topRows, function ($r) {
-    return $r['category'] === 'produce';
-})), 0, 15);
+// Produce only, for the fresh-produce chart, rolled up to the kind of produce:
+// Lettuce Romaine and Lettuce Iceberg are both Lettuce, Sweet Potatoes are
+// Potatoes. Generic names put the kind first or last with no fixed order
+// ("Onions Yellow" but "Green Beans"), so the kind is found by vocabulary, not
+// by position. A plural or mass-noun match beats a singular one, because a
+// variety tends to be named by a singular noun ("Grape Tomatoes"); among
+// equals the last word wins. A name with no known kind stays its own bar. The
+// Top Items Detail table below still reports the overall top 15 across all
+// three categories, by generic name.
+$produceKinds = [   // display name => singular form ('' for a mass noun)
+    'Apples' => 'apple', 'Apricots' => 'apricot', 'Artichokes' => 'artichoke',
+    'Asparagus' => '', 'Avocados' => 'avocado', 'Bananas' => 'banana',
+    'Beans' => 'bean', 'Beets' => 'beet', 'Broccoli' => '', 'Cabbage' => '',
+    'Carrots' => 'carrot', 'Cauliflower' => '', 'Celery' => '',
+    'Cherries' => 'cherry', 'Corn' => '', 'Cucumbers' => 'cucumber',
+    'Eggplant' => '', 'Garlic' => '', 'Grapes' => 'grape',
+    'Grapefruit' => '', 'Greens' => '', 'Kale' => '', 'Leeks' => 'leek',
+    'Lemons' => 'lemon', 'Lettuce' => '', 'Limes' => 'lime',
+    'Mangoes' => 'mango', 'Melons' => 'melon', 'Mushrooms' => 'mushroom',
+    'Nectarines' => 'nectarine', 'Okra' => '', 'Onions' => 'onion',
+    'Oranges' => 'orange', 'Peaches' => 'peach', 'Pears' => 'pear',
+    'Peas' => '', 'Peppers' => 'pepper', 'Pineapple' => '', 'Plums' => 'plum',
+    'Potatoes' => 'potato', 'Pumpkins' => 'pumpkin', 'Radishes' => 'radish',
+    'Spinach' => '', 'Squash' => '', 'Tomatoes' => 'tomato', 'Turnips' => 'turnip',
+];
+$kindStrong = [];   // plural or mass noun → display name
+$kindWeak   = [];   // singular            → display name
+foreach ($produceKinds as $display => $singular) {
+    $kindStrong[strtolower($display)] = $display;
+    if ($singular !== '') $kindWeak[$singular] = $display;
+}
+$produceKindOf = function (string $name) use ($kindStrong, $kindWeak): string {
+    $strong = $weak = null;
+    foreach (preg_split('/[^a-z]+/', strtolower($name), -1, PREG_SPLIT_NO_EMPTY) as $w) {
+        if (isset($kindStrong[$w])) $strong = $kindStrong[$w];
+        elseif (isset($kindWeak[$w])) $weak = $kindWeak[$w];
+    }
+    return $strong ?? $weak ?? $name;
+};
+$produceGroups = [];
+foreach ($topRows as $r) {
+    if ($r['category'] !== 'produce') continue;
+    $g = $produceKindOf($r['name']);
+    if (!isset($produceGroups[$g])) {
+        $produceGroups[$g] = ['name' => $g, 'category' => 'produce', 'lbs' => 0.0,
+                              'each' => 0, 'est_lbs' => 0.0, 'items' => []];
+    }
+    $produceGroups[$g]['lbs']     += $r['lbs'];
+    $produceGroups[$g]['each']    += $r['each'];
+    $produceGroups[$g]['est_lbs'] += $r['est_lbs'];
+    $produceGroups[$g]['items'][]  = $r['name'];
+}
+$topProduce = array_values($produceGroups);
+usort($topProduce, function ($a, $b) { return $b['est_lbs'] <=> $a['est_lbs']; });
+$topProduce = array_slice($topProduce, 0, 15);
 
 // Protein rolled up to the meat. Several generic names collapse onto one bar —
 // Pork Loin Fillet and Pork Chops are both Pork — so this is a handful of bars,
@@ -740,7 +808,7 @@ renderNav('impact');
       </div>
       <div class="row" style="margin-top:14px;">
         <button type="submit" class="btn btn-primary" style="flex:0 0 170px;">📊 Run Report</button>
-        <a href="" class="btn btn-secondary" style="flex:0 0 100px; text-align:center; text-decoration:none;">↺ Reset</a>
+        <a href="?reset=1" class="btn btn-secondary" style="flex:0 0 100px; text-align:center; text-decoration:none;">↺ Reset</a>
         <?php if ($hasData): ?>
           <button type="button" class="btn btn-secondary" style="flex:0 0 100px;" onclick="window.print()">🖨 Print</button>
         <?php endif; ?>
@@ -1280,6 +1348,7 @@ renderNav('impact');
             'cat'   => $r['category'],
             'lbs'   => round($r['lbs'], 1),
             'each'  => $r['each'],
+            'items' => $r['items'],
         ];
     }, $topProduce)) ?>;
     if (top.length) new Chart(document.getElementById('topChart'), {
@@ -1302,6 +1371,10 @@ renderNav('impact');
             if (r.lbs  > 0) parts.push(r.lbs + ' lb weighed');
             if (r.each > 0) parts.push(r.each + ' counted');
             return r.value + ' est. lb (' + parts.join(' + ') + ')';
+          }, afterLabel: function (c) {
+            var items = top[c.dataIndex].items;
+            return (items.length > 1 || items[0] !== top[c.dataIndex].name)
+              ? 'Includes: ' + items.join(', ') : '';
           } } }
         },
         scales:{

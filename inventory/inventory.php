@@ -31,8 +31,17 @@ foreach ($db->query("SELECT DISTINCT generic_name, kind FROM scans") as $r) {
 }
 ksort($names, SORT_NATURAL | SORT_FLAG_CASE);
 
+// Items listed in the Order Report's "Reorder Alerts" card — every row of the
+// alerts table, on or off, exactly as that card shows them. Drives the
+// "Reorder Alerts Only" filter and the Remove Reorder Alerts Stock button.
+$alertNames = [];
+foreach ($db->query("SELECT DISTINCT generic_name FROM alerts") as $r) {
+    $alertNames[$r['generic_name']] = true;
+}
+
 $saved = false;
 $produceCleared = false;
+$alertsCleared = false;
 // Purchased rows saved with an Order Unit but no Avg Wt to convert by
 // (see the save loop).
 $needsWeight = [];
@@ -47,6 +56,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         $clr->execute([now()]);
         $produceCleared = true;
+    } elseif (($_POST['action'] ?? '') === 'remove_alerts') {
+        // Same as Remove Produce Stock, but for every item listed in the Order
+        // Report's Reorder Alerts card. Never-counted items are already zero.
+        $clr = $db->prepare(
+            "UPDATE inventory SET count = 0, updated_at = ?
+             WHERE generic_name IN (SELECT generic_name FROM alerts)"
+        );
+        $clr->execute([now()]);
+        $alertsCleared = true;
     } else {
         // Normalize the submission into one $rows list. Primary path: a single
         // JSON blob serialized by JS at submit time. This exists because PHP's
@@ -255,6 +273,9 @@ renderNav('inventory');
   <?php if ($produceCleared): ?>
     <div class="banner success">✅ Produce stock removed (all produce counts set to zero).</div>
   <?php endif; ?>
+  <?php if ($alertsCleared): ?>
+    <div class="banner success">✅ Reorder Alerts stock removed (all Reorder Alerts item counts set to zero).</div>
+  <?php endif; ?>
 
   <div class="card">
     <h2>Latest Inventory Count</h2>
@@ -267,10 +288,11 @@ renderNav('inventory');
       <p style="color:#777;">No items in the lookup tables yet. Scan a few barcodes first or add entries under Lookup Tables.</p>
     <?php else: ?>
     <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
-      <select id="invKind" onchange="applyInvFilter()" style="width:160px;">
+      <select id="invKind" onchange="applyInvFilter()" style="width:210px;">
         <option value="">All Types</option>
         <option value="packaged">Packaged Only</option>
         <option value="produce">Produce Only</option>
+        <option value="alerts">Reorder Alerts Only</option>
       </select>
       <input type="search" id="invSearch" placeholder="🔍 Filter by generic name…"
              oninput="applyInvFilter()"
@@ -282,6 +304,11 @@ renderNav('inventory');
             onsubmit="return confirm('Set every produce item\'s current count to zero? This cannot be undone.');">
         <input type="hidden" name="action" value="remove_produce">
         <button type="submit" class="btn btn-secondary">Remove Produce Stock</button>
+      </form>
+      <form method="post" style="display:inline; margin:0;"
+            onsubmit="return confirm('Set the current count of every item listed under Reorder Alerts to zero? This cannot be undone.');">
+        <input type="hidden" name="action" value="remove_alerts">
+        <button type="submit" class="btn btn-secondary">Remove Reorder Alerts Stock</button>
       </form>
       <button type="submit" form="invForm" class="btn btn-primary">Save All</button>
     </div>
@@ -352,7 +379,7 @@ renderNav('inventory');
                 ? rtrim(rtrim(number_format($crt, 2, '.', ''), '0'), '.')
                 : '';
         ?>
-          <tr data-name="<?= htmlspecialchars(strtolower($name)) ?>" data-kind="<?= htmlspecialchars($kinds[$name] ?? 'packaged') ?>">
+          <tr data-name="<?= htmlspecialchars(strtolower($name)) ?>" data-kind="<?= htmlspecialchars($kinds[$name] ?? 'packaged') ?>" data-alert="<?= isset($alertNames[$name]) ? '1' : '0' ?>">
             <td class="inv-name">
               <input type="hidden" name="name[<?= $i ?>]" value="<?= htmlspecialchars($name) ?>">
               <?= htmlspecialchars($name) ?>
@@ -537,7 +564,10 @@ function applyInvFilter() {
     var name    = tr.getAttribute('data-name') || '';
     var rowKind = tr.getAttribute('data-kind') || '';
     var matchesName = !q    || name.includes(q);
-    var matchesKind = !kind || rowKind === kind;
+    // "alerts" isn't a kind: it matches rows listed in the Order Report's
+    // Reorder Alerts card, whatever their type.
+    var matchesKind = !kind
+      || (kind === 'alerts' ? tr.getAttribute('data-alert') === '1' : rowKind === kind);
     var visible = matchesName && matchesKind;
     tr.style.display = visible ? '' : 'none';
     if (visible) shown++;
