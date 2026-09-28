@@ -458,19 +458,15 @@ E.append(step(2, "Tap <b>+ Assist</b> on the order you're helping with. The "
 E.append(step(3, "Scan normally. Everything you scan goes onto the shared "
                  "order, and each screen shows the other's items within a "
                  "couple of seconds — no refreshing."))
-E.append(step(4, "Keep scanning for the next household. When the other "
-                 "volunteer ends the order, your screen shows <b>Assist Mode "
-                 "— waiting for the next order to assist</b> and joins the next "
-                 "order they start on its own, so a pair can work straight "
-                 "through a line without re-joining between shoppers."))
-E.append(step(5, "When you're done helping for good, tap <b>Leave Assist</b>. "
-                 "That is the only thing that takes your station out of assist "
-                 "mode and lets it start orders of its own again."))
+E.append(step(4, "When the other volunteer ends the order, your screen shows "
+                 "<b>Assist Mode — waiting for the next order to assist</b> and "
+                 "joins their next order on its own."))
+E.append(step(5, "Done helping for good? Tap <b>Leave Assist</b> — the only way "
+                 "back to starting orders of your own."))
 E.append(bullet(
-    "While your station is waiting between orders, scanning an item joins the "
-    "next order and records it there — no need to wait for the screen to "
-    "catch up. If nobody has started one yet, the scanner buzzes and says so, "
-    "and nothing is recorded."))
+    "While waiting between orders, scanning an item joins the next order and "
+    "records it there. If nobody has started one yet, the scanner buzzes and "
+    "nothing is recorded."))
 E.append(bullet(
     "If your station has the <b>Assist</b> command barcode posted, scanning it "
     "does the same thing as tapping <b>+ Assist</b>, so you never have to "
@@ -481,10 +477,9 @@ E.append(Paragraph("Who ends the order", S["h3"]))
 E.append(body(
     "The station that <b>started</b> the order owns it. Only that screen has "
     "<b>End Order</b> and <b>Cancel Order</b>; a helper sees <b>Leave "
-    "Assist</b> in their place. That's deliberate — it keeps two people from "
-    "closing the same shopper out twice, and stops a helper cancelling an "
-    "order that isn't theirs. If you're helping and the shopper is finished, "
-    "tell the volunteer who started it."))
+    "Assist</b> instead, so nobody closes a shopper out twice or cancels an "
+    "order that isn't theirs. When the shopper is finished, tell the volunteer "
+    "who started it."))
 E.append(bullet(
     "The starting station shows a <b>“1 assisting”</b> tag while "
     "you're helping, so they know you're on it."))
@@ -493,11 +488,8 @@ E.append(bullet(
     "list. Your own scans carry a filled badge, your teammate's an outlined "
     "one. On a single station the column stays hidden."))
 E.append(bullet(
-    "While you're assisting, your device beeps on each item you scan — useful "
-    "on a phone, which has no scanner of its own to beep at you. The <b>Beep "
-    "on each scan</b> switch next to <b>Leave Assist</b> turns it off if the "
-    "room is already noisy enough. It starts on, and whichever way you leave "
-    "it is how your device comes back the next time it assists."))
+    "While assisting, your device beeps on each scan (handy on a phone). The "
+    "<b>Beep on each scan</b> switch turns it off, and is remembered."))
 E.append(bullet(
     "<b>Either</b> of you can remove a mis-scan with the red <b>×</b> — "
     "including a line the other person entered."))
