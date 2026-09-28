@@ -37,11 +37,14 @@ whole picture.
 ## What it does
 
 ### 1. Checkout & inventory
-- **Scan out orders.** An operator taps **Start Order**, scans each item going
-  out the door, then taps **End Order**. Each order gets an auto-incrementing
-  number and start/end timestamps; closing it deducts the scanned quantities
-  from inventory. Multiple scanning **stations** can each hold their own open
-  order at once (tracked by a per-device cookie).
+- **Scan out orders.** The first item scanned opens a new order; the operator
+  scans each item going out the door, then taps **End Order** (or scans the
+  `990001` command barcode). Each order gets an auto-incrementing number and
+  start/end timestamps; closing it deducts the scanned quantities from
+  inventory. Multiple scanning **stations** can each hold their own open order
+  at once (tracked by a per-device cookie). Closing is **all-or-nothing** — the
+  deductions run in one transaction, so a timeout part-way through can't leave
+  an order closed with only some of its items taken out of inventory.
 - **Team scanning.** Two operators can check the same household out together.
   An idle station shows an **Another station is scanning** card listing the
   open orders elsewhere in the pantry; tapping **+ Assist** joins one, and from
@@ -53,9 +56,13 @@ whole picture.
   their teammate entered. Once a second station joins, a **Who** column appears
   in the item list badging each row with the station that scanned it (filled
   badge = this station, outline = the teammate's); it stays hidden on a
-  single-station pantry, as does the whole Assist card. Ending or cancelling
-  the order releases the helpers back to idle. A common use is a volunteer's
-  phone in camera mode assisting the wired laser station on a busy day.
+  single-station pantry, as does the whole Assist card. Assist is **sticky**:
+  when the owner ends the order, the helper waits in *Assist Mode* and joins
+  the owner's next order on its own, so a pair can work straight through a
+  line; only **Leave Assist** returns it to starting orders of its own. A
+  per-station **Beep on each scan** switch gives a phone helper audible
+  feedback. A common use is a volunteer's phone in camera mode assisting the
+  wired laser station on a busy day.
 - **Closing a stranded order.** A station that disappears mid-order — laptop
   shut, tablet carried off — leaves its order open with nobody able to close
   it, since only the owning station may End or Cancel. Every other station goes
@@ -72,6 +79,34 @@ whole picture.
   [Open Food Facts](https://world.openfoodfacts.org/) for the branded name,
   asks OpenAI to reduce it to a 2–4 word generic, and caches the mapping in
   `upc_lookup` so every later scan is instant and offline.
+- **Unidentified items.** A barcode neither Open Food Facts nor OpenAI can
+  name normally opens an *Identify this item* window. With **Settings → Ignore
+  Unknown Items** on, the station instead records it under the reserved name
+  `Unidentified` and moves on, so the volume is still counted; the name can be
+  filled in later (the next scan with the setting off, or Lookup Tables), which
+  also renames that barcode's past scans. `Unidentified` never drives a
+  reorder.
+- **Product recalls.** Ticking **Recalled** on a UPC under Lookup Tables stops
+  every station recording it — enforced server-side in `lookupBarcode()`, so it
+  reaches stations that were already open. The station raises a red *Recalled
+  Product* window with a siren and makes the volunteer confirm the item is out
+  of the cart. The mapping and its history are untouched; clearing the box
+  restores the item.
+- **Connection-lost handling.** Every request from the scan station and the
+  Menu Counter pick queue goes through one wrapper with a timeout. If the
+  server can't be reached — a failed connection, a timeout, or a non-JSON reply
+  such as a host error page or a Wi-Fi login page — or the network gate refuses
+  the station (`access_denied` in the 403 JSON from `auth.php`), a red window
+  stops the operator, further scans or ticks are refused rather than queued,
+  and a probe retries every 3 seconds. The window says whether the fault is
+  the local internet (checked against well-known public hosts), the server, or
+  the network/hours gate. On recovery the page redraws from the server and
+  lists what was **not saved** (redo it) apart from what **may have saved**
+  (check before redoing, so nothing is counted twice).
+- **Inventory page.** The canonical current-count list. **Remove Produce
+  Stock** and **Remove Reorder Alerts Stock** zero every produce item or every
+  item listed in the Order Now report's Reorder Alerts card; a **Reorder Alerts
+  Only** filter shows exactly which items the latter covers.
 - **Produce.** 4–5 digit PLU codes (and 12-digit pantry labels beginning with
   `4`) are recognized as produce and prompt for a weight. The produce table
   ships pre-seeded with the most common items.
@@ -94,7 +129,10 @@ All of these draw from the same inventory pool:
 
 ### 3. Reports
 - **Order Now** — the reorder report. For each item it computes a Par Level
-  and how much to order (details below).
+  and how much to order (details below). The Reorder reminders line is grouped
+  by unit, biggest request first, and each row's **Restock** box starts ticked
+  when the item is one of those reminders with a non-zero order request, so
+  **Generate Email** and **Restock Now** act on what the page is asking for.
 - **Orders Listing** — every order and its items over a date range, with pills
   marking delivery/event orders.
 - **Item Usage** — per-item totals over a date range.
@@ -108,6 +146,13 @@ All of these draw from the same inventory pool:
   is real; packaged goods are counted, so any pound or meal figure uses the
   average-item-weight and pounds-per-meal assumptions set at the top of the
   page and restated in the report's Methodology card. No client PII appears.
+  The window opens on the first of last month and then remembers the last
+  **Start Date** run (a cookie; **Reset** clears it). *Where the Food Comes
+  From* covers the pounds distributed in that window, split at each item's
+  lifetime Bought share from Restock, and says so rather than claiming "100%
+  donated" when there is no restock history. The fresh-produce chart rolls
+  varieties up to the kind of produce (Romaine and Iceberg → Lettuce), with
+  the member items in each bar's tooltip.
 
 ### 4. The demand model (Order Now report)
 
@@ -142,6 +187,23 @@ Email goes out via authenticated SMTP when configured, otherwise PHP `mail()`.
 The SMTP client in `mailer.php` is self-contained — no libraries.
 The "Email Order" features uses Gmail or you can alternatively "Print Order".
 
+### 6. Uptime monitor
+`monitor.php` (Settings → **Monitor Uptime**) is a dashboard for whoever looks
+after the pantry's systems. It is login-only with **no network gate**, so it can
+run from home as well as on-site, under either the administrator or supervisor
+password. Left open, it polls `monitor.php?action=status` every 3 seconds during
+Allowed Hours and once a minute outside them (dropping straight back to 3
+seconds on any failure). Each check also counts today's orders in **both**
+databases, so a database fault shows as *Server up — database problem* rather
+than passing silently. One missed check is a blip; two in a row is an outage,
+which raises the same window and falling-notes alarm the stations use (repeated
+every 15 seconds), and recovery plays the rising chime. A lapsed login is shown
+as *Signed out* and paused, not counted as downtime. Uptime, outage count,
+downtime, and response time are tracked, and the timestamped event log (kept in
+the page only) can be copied as text for a ticket. Run it at the pantry and it
+also catches the pantry's own internet dropping; run elsewhere, it watches the
+server only.
+
 ---
 
 ## Security model
@@ -169,9 +231,14 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
   takes over instead. A successful login clears the record; 30 quiet minutes
   do too. Codes expire in 15 minutes, die after 5 wrong tries, and re-sends
   are paced so failed logins can't flood the administrator's inbox.
-- **Network gate.** Pages can be restricted to a single allowed IP (your
-  pantry's public WiFi address) and to configurable weekly **allowed hours**.
-  Both live in `auth.php`; leave the IP blank to allow all.
+- **Network gate.** Pages can be restricted to up to three allowed public IPv4
+  addresses (your pantry's WiFi, plus a backup line or second site) and to
+  configurable weekly **allowed hours**. Both live in `auth.php`; leave every
+  address blank to allow all. A supervisor may change the primary address; the
+  two additional ones are administrator-only. Page requests get a styled
+  *Access Denied* wall; JSON requests get a 403 carrying `access_denied:
+  "network" | "hours"`, which an open scan station turns into a window naming
+  the gate it hit. The Uptime Monitor is deliberately outside the gate.
 - **Field-level encryption.** PII security and privacy is paramount.
   Sensitive columns are encrypted at rest with libsodium (`crypto.php`):
   **every `settings` value** (the hashed `admin_password` /
@@ -184,6 +251,24 @@ The "Email Order" features uses Gmail or you can alternatively "Print Order".
   > with `OPENPANTRY_KEY_PATH` (env var) or a `FS_ENC_KEY_PATH` constant. On a
   > host without libsodium (PHP < 7.2), encryption degrades to a no-op and
   > values are stored in clear text until a sodium-capable PHP runs.
+
+---
+
+## Reliability & performance
+
+- **Order close and cancel are transactional.** `endOrderById()` and
+  `cancelOrderById()` in `common.php` take the write lock up front and commit
+  or roll back as a whole. `api_order.php` always answers in JSON, and
+  `isDbBusyError()` separates contention with another station ("busy — tap End
+  again") from a failure that will repeat ("trying again will not help"). Either
+  way the order is left exactly as it was.
+- **SQLite tuning.** Every connection (main, `picklist.db`, and the login
+  throttle) runs WAL with `PRAGMA synchronous = NORMAL` — crash-safe under WAL,
+  and it removes the per-commit fsync that dominated a scan's cost on shared
+  hosting. `idx_scans_generic_kind` on `scans(generic_name, kind)` answers the
+  Inventory page's opening query from the index, and `picklist.db` indexes
+  `order_items(order_id)` for the pick queue's 5-second poll. Both are added
+  by idempotent migrations.
 
 ---
 
@@ -205,13 +290,18 @@ openpantry/
 ├── common.php         library: header/nav/styles + station cookie + team scanning
 ├── lookup.php         library: barcode → generic name (OFF + OpenAI)
 ├── mailer.php         library: dependency-free SMTP / mail() sender
+├── ratelimit.php      library: login throttle + emailed soft-lock codes
 ├── api_order.php      JSON: start/end/cancel orders + assist join/leave/sync
 │                       + admin remote end/cancel of another station's order
 ├── api_scan.php       JSON: lookup / record / delete a scan
 ├── api_alert.php      JSON: reorder-alert CRUD + email toggle
+├── api_kitchen.php    JSON: AI recipe / how-to-prepare text for the scan station
+├── api_unscanned.php  POST: mark days the pantry ran without scanning (Order Report)
 ├── api_openai_test.php       JSON: smoke-test the OpenAI key
 ├── api_send_test_email.php   JSON: send a test reorder reminder
 ├── cron_reorder_alerts.php   cron: email triggered reorder reminders
+├── cli_dispersion.php        CLI: diagnostic dump of each item's fitted dispersion (φ)
+├── monitor.php        page: uptime monitor (+ ?action=status JSON heartbeat)
 ├── scan/              page: scanning station (laser scanner + phone camera)
 ├── inventory/         page: manual current-count entry
 ├── restock/           page: batch add-to-inventory
@@ -225,10 +315,13 @@ openpantry/
 │   ├── volume_report/           page: orders & scans per day
 │   ├── basket_report/           page: basket-size distribution
 │   └── impact_report/           page: impact summary (both databases)
-├── lookup_admin/      page: manage produce + UPC mappings
-├── deduplicate/       page: merge duplicate generic names (scans, lookups, inventory, alerts)
-├── settings/          page: OpenAI key, par defaults, network access, admin email/password, SMTP
+├── lookup_admin/      page: manage produce + UPC mappings, product recalls
+├── deduplicate/       page: merge duplicate generic names (scans, lookups, inventory, alerts);
+│                       opened from Settings → Consolidate Names
+├── settings/          page: OpenAI key, par defaults, Ignore Unknown Items, network access,
+│                       admin/supervisor passwords, SMTP; links to Consolidate Names + Monitor Uptime
 ├── logout/            page: clears auth cookie
+├── docs/              handbooks, quick-setup sheets, barcode sheets, and the scripts that build them
 └── menucounter/       nested app: customer order form, pick queue, item admin
     ├── index.php         customer-facing order form
     ├── submit_order.php  POST handler for the order form
@@ -259,9 +352,10 @@ below.
    `encryption_key.php` can be created on first hit.
 4. **Browse to the app root.** The schema initializes itself, the produce table
    seeds with common PLU codes, and the databases are created on first load.
-5. **Open Settings.** Paste your OpenAI API key. Set the **Network Access** IP
-   (your pantry's public WiFi address) and **change the default admin password
-   (`admin`)**. Optionally set the administrator email and SMTP details.
+5. **Open Settings.** Paste your OpenAI API key. Set the **Secure Network
+   Access** IP (your pantry's public WiFi address, plus up to two more) and
+   **change the default admin password (`admin`)**. Optionally set the
+   administrator email, SMTP details, and a supervisor password.
 6. **Scan.** Open `/openpantry/scan/` on a tablet wired to the handheld
    scanner. Tap anywhere on the page to keep focus in the barcode field — the
    scanner types digits + Enter and the page does the rest. On a device with no
@@ -271,7 +365,12 @@ below.
    device and tap **+ Assist** on the order already running.
 7. **Customer ordering** lives at `/openpantry/menucounter/`; the employee pick
    queue is at `/openpantry/menucounter/orders/`.
-8. **(Optional) Reorder-reminder cron.** Add a cron job that runs the mailer on
+8. **(Optional) Uptime monitor.** Open `/openpantry/monitor.php` (or Settings →
+   Monitor Uptime) in its own browser window, click the page once so Chrome
+   will let it play alert sounds, and add the site under Chrome Settings →
+   Performance → *Always keep these sites active* so Memory Saver can't put the
+   tab to sleep.
+9. **(Optional) Reorder-reminder cron.** Add a cron job that runs the mailer on
    your cadence, e.g. daily at 7am:
 
    ```
@@ -351,6 +450,14 @@ second item until the scale returns to zero. On a wedge scale this is also a
 hardware rule — it only arms its next transmission once cleared — and weighing
 first needs it in “PC” mode (press `.` then `9`) rather than “print” mode.
 
+On the USB path the station plays a soft **ready tick** (`readyBeep()`) the
+moment the platform is clear and the last item's code is in, so produce can be
+paced by ear. While disarmed it polls the scale for clearance by feature report,
+since an operator who swaps items within one report frame never produces the
+empty frame the station would otherwise wait for; an item set down that fast is
+named **“Put on too soon — lift the item off and set it down again”** rather
+than left silently unweighed.
+
 **One weight at a time.** A captured weight is held until its PLU is entered or
 it is discarded, and while it is held the station refuses to weigh anything
 else — the strip says **“No PLU entered.”** and there is no beep. The refused
@@ -424,6 +531,9 @@ first scan the mapping is local-only.
 - The scan station has a "Create Recipe" feature where generative AI
   can print a recipe for a client based on their order's ingredients as well
   as a "How do I prepare this item?" option for each item in the client order.
+  Both print through a hidden frame on the scan page, so no tab or pop-up opens
+  and the station keeps focus; launch the station's browser with
+  `--kiosk-printing` to skip the print dialog as well.
 - The app classifies and maps brand labelled products to their generic named 
   equivalents using a LLM to simplify tracking for which multiple brand names
   are irrelevant noise. When corrections are made to any mappings, it further
