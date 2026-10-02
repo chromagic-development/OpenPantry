@@ -416,11 +416,20 @@ to pounds automatically. Capture waits for the scale's own *stable* flag **and**
 for the reading to hold near where it started; scales in this class raise that
 flag while the value is still creeping, so a single stable report is not
 trusted. Two hold windows keep that from feeling sluggish (both in
-`scan/scan.php`): `HID_SETTLE_FAST_MS` (~350 ms) when consecutive reports read
-*identically* — a parked value, which is what a genuinely settled item looks
-like — and `HID_SETTLE_MS` (~700 ms) when it is still jittering inside the
+`scan/scan.php`): `HID_SETTLE_FAST_MS` (~400 ms) that the reading must sit
+within one 0.1 oz division (`HID_SETTLE_PARK_LBS`) — a parked value, which is
+what a genuinely settled item looks like, last-digit flicker included — and `HID_SETTLE_MS` (~700 ms) when it is still jittering inside the
 tolerance. A creeping weight changes on every report by definition, so it can
-never take the fast path. Needs a
+never take the fast path, and one already seen stepping the same way twice must
+hold still longer (`HID_SETTLE_TREND_MS`, ~900 ms).
+
+The DYMO M25 only sends a report once a second for an item at rest, so on its
+reports alone confirming a reading takes one to two seconds. While the scale is
+in use the station therefore also *polls* it about ten times a second (the HID
+feature report), which brings capture to roughly half a second after the reading
+stops. Polled readings are trusted only after the scale has shown them to be
+live — a polled value the report stream never sent — so a scale that answers
+polls from a stale copy keeps the slower, report-only timing. Needs a
 Chromium browser (Chrome, Edge, ChromeOS); stations without WebHID simply don't
 see the strip.
 

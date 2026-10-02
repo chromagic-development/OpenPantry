@@ -1819,25 +1819,56 @@ const HID_MIN_CAPTURE_LBS = 0.02;
 //
 // There are two settle paths, because the evidence differs in strength:
 //
-//   • Every report reads *identically* — the value is parked, which is what a
-//     genuinely settled item looks like. Capture quickly.
-//   • The value jitters inside the tolerance — weaker evidence. Hold longer.
+//   • Every report sits inside a band one division wide (HID_SETTLE_PARK_LBS)
+//     — the value is parked, which is what a genuinely settled item looks
+//     like. Capture quickly.
+//   • The value jitters wider, inside the tolerance — weaker evidence. Hold
+//     longer.
 //
-// A creeping weight changes on every report by definition, so it can never
+// A creeping weight leaves any fixed band by definition, so it can never
 // qualify for the fast path. That is what lets this be responsive without
 // giving anything back on accuracy: speed is granted only to readings that
 // have actually stopped.
 //
 // Raise these if weights still land low; the cost is only a later beep.
-const HID_SETTLE_FAST_MS = 250;     // hold when consecutive reads are identical
+//
+// The fast path's hold is measured from when the reading last showed a value
+// the run had not seen, not from when the window opened: a value that moved
+// 100 ms ago has not been parked for the window's whole age, however old the
+// window is.
+const HID_SETTLE_FAST_MS = 400;     // how long a parked reading must hold
 const HID_SETTLE_MS      = 700;     // hold when the value is still jittering
-// Minimum reports either path must see — and on a slow-reporting scale this,
-// not the timers above, is what you actually wait for. Measured on a DYMO M25:
-// it emits one report per second for a stationary item, so each report here
-// costs a full second. Two means the reading must hold unchanged across a
-// one-second gap before it counts, which is a real confirmation; three was two
-// seconds of it and felt broken. One would be no confirmation at all — that is
-// the setting that let a still-creeping weight get recorded.
+// A reading already caught creeping (two steps the same way) has to sit still
+// for about the one-second gap the input stream alone used to demand. Creep
+// slows as it ends, and its tail can pause longer than FAST_MS between steps;
+// this keeps the quick capture for items that never moved, not ones that just
+// stopped looking like they were moving. Under 1000 so that two parked
+// one-second input frames still qualify despite timer jitter.
+const HID_SETTLE_TREND_MS = 900;
+// How far apart the readings in a parked run may be: one M25 division, 0.1 oz.
+// Requiring them to be *identical* sent every item whose last digit flickers —
+// a division either way, which is just the scale rounding a weight that sits
+// near a step — off the fast path and onto the jittery one, which on
+// one-second reports takes two to three seconds or more. The band is measured
+// across the whole run (highest minus lowest), not reading to reading: steps of
+// one division the same way are each within 0.1 oz of the last, but the second
+// one leaves the band, so a creep still cannot pass as parked. The epsilon
+// absorbs float error in the decoded pounds, so exactly one division counts.
+const HID_SETTLE_PARK_LBS = 0.1 / 16 + 1e-9;
+// Minimum samples either path must see. Measured on a DYMO M25: it emits one
+// input report per second for a stationary item, so on input reports alone
+// each sample costs a full second, and this — not the timers above — is what
+// you wait for. Two means the reading must hold unchanged across a one-second
+// gap (within HID_SETTLE_PARK_LBS); three was two seconds of it and felt broken. One would be no
+// confirmation at all — that is the setting that let a still-creeping weight
+// get recorded.
+//
+// That one-second wait is why the scale is also *polled* while an item is
+// settling (see HID_POLL_MS): once the feature report has proven it carries
+// live readings, samples arrive about every 100 ms, the counts below are met
+// almost at once, and the timers become the real gate — so capture lands a
+// little under half a second after the reading stops moving, instead of one
+// to two seconds after.
 const HID_SETTLE_REPORTS = 2;
 // The jittery path needs one more, because its evidence is weaker: the value is
 // changing, just not by much. At 1 Hz two samples cannot tell a settled reading
@@ -1876,7 +1907,24 @@ const SCALE_STARTUP_MS = 12000;
 // bytes as a feature report, and reading it is a round trip on demand rather
 // than a wait for the next scheduled frame, which brings the clear-the-platform
 // pause down from about a second to about a tenth of one.
+//
+// The same poll runs while an item is settling on an armed platform, for the
+// same reason: the settle check needs two matching readings, and waiting a
+// second for the second one is most of the pause after the display settles.
+// It only feeds the settle check once the feature report is proven live,
+// though — a scale that answers it from a cached copy of its last input report
+// would hand back the same number ten times a second, which looks exactly like
+// a parked reading and would capture a creeping weight early. The proof is a
+// polled reading the input stream never sent (see notePolledSample), which a
+// cache cannot produce.
 const HID_POLL_MS = 100;
+// How long after the weight last changed an armed, empty platform keeps being
+// polled. Waiting for an input frame to show an item has landed would start
+// the poll up to a second late — after the item has mostly settled, which is
+// both the delay this exists to remove and the motion the liveness proof needs
+// to see. So the poll keeps running through a stretch of weighing, and stops
+// only once the scale has sat untouched for this long, between customers.
+const HID_POLL_ACTIVE_MS = 30000;
 
 const hid = {
   device:       null,
@@ -1888,7 +1936,10 @@ const hid = {
   settleSince:  0,      // when it opened
   settleCount:  0,      // stable reports seen inside it
   settleLast:   null,   // previous reading, for spotting identical repeats
-  settleExact:  0,      // consecutive reports reading exactly the same
+  settleExact:  0,      // consecutive reports inside the parked band
+  exactSince:   0,      // when that parked run began
+  parkLo:       null,   // lowest reading in the parked run
+  parkHi:       null,   // highest reading in the parked run
   settleSign:   0,      // direction of the last change: +1, -1, or 0
   settleMono:   0,      // consecutive changes in that same direction
   connectedAt:  0,      // when this device was opened
@@ -1899,6 +1950,10 @@ const hid = {
   reportId:     0,      // report ID the scale streams on, for the clearance poll
   polling:      false,  // a clearance poll is in flight
   pollBroken:   false,  // this scale answers no feature reads — stop asking
+  pollLive:     false,  // feature reads proven live — polled samples may settle
+  pollUnseen:   new Set(),  // polled readings not (yet) seen on the input stream
+  inputKey:     null,   // status + raw weight of the last input report
+  inputSeq:     0,      // input reports received, to spot a poll overtaken
 };
 
 
@@ -1910,8 +1965,48 @@ function resetSettle() {
   hid.settleCount  = 0;
   hid.settleLast   = null;
   hid.settleExact  = 0;
+  hid.exactSince   = 0;
+  hid.parkLo       = null;
+  hid.parkHi       = null;
   hid.settleSign   = 0;
   hid.settleMono   = 0;
+}
+
+// Begin a parked run at this reading.
+function startParkedRun(lbs, now) {
+  hid.settleExact = 1;
+  hid.exactSince  = now;
+  hid.parkLo      = lbs;
+  hid.parkHi      = lbs;
+}
+
+// Identity of a reading for the liveness proof: status and raw weight together,
+// since a cached report would repeat both.
+function scaleSampleKey(r) { return r.status * 65536 + r.raw; }
+
+// A polled reading that differs from the last input report is a candidate
+// proof that the feature report is live — but only a candidate. A cache that
+// updates the instant the scale queues an input report can be read in the gap
+// before that report reaches us. So the proof completes only when the *next*
+// input report turns out not to be that value either: the poll saw a reading
+// the input stream never carried, which a cache of that stream cannot do.
+//
+// Every candidate since the last frame is kept, not just the latest. An item
+// landing produces its in-between readings first and its settled one last, and
+// by the next frame the latest poll is that settled value — the one reading
+// the frame is bound to match.
+function notePolledSample(r) {
+  if (hid.pollLive) return;
+  const key = scaleSampleKey(r);
+  if (key !== hid.inputKey) hid.pollUnseen.add(key);
+}
+
+function noteInputSample(r) {
+  const key = scaleSampleKey(r);
+  for (const k of hid.pollUnseen) if (k !== key) { hid.pollLive = true; break; }
+  hid.pollUnseen.clear();
+  hid.inputKey = key;
+  hid.inputSeq++;
 }
 
 function scaleSupported() { return 'hid' in navigator; }
@@ -1985,6 +2080,7 @@ async function onScaleReport(e) {
   // Remembered for the clearance poll: the same report ID carries the scale's
   // feature report, and nothing else tells us what that ID is.
   hid.reportId = e.reportId;
+  noteInputSample(r);
   scaleHeartbeat(r.lbs);
 
   // A scale that has powered itself down keeps the USB connection up and emits
@@ -2069,47 +2165,79 @@ async function onScaleReport(e) {
     }
     return;
   }
+  await settleScaleSample(r);
+}
 
+// One stable, loaded reading on an armed platform, from either source: an
+// input report, or a clearance-style poll once the feature report is proven
+// live. Both feed the same window, so a poll and the scheduled frame that
+// follows it simply count as two samples.
+async function settleScaleSample(r) {
+  const now = Date.now();
   // Stable — but hold it. Comparing against the anchor rather than the previous
   // report is what stops a slow creep from settling: drifting a division per
   // report keeps restarting the window instead of quietly accumulating.
   if (hid.settleAnchor === null
       || Math.abs(r.lbs - hid.settleAnchor) > HID_SETTLE_TOL_LBS) {
     hid.settleAnchor = r.lbs;
-    hid.settleSince  = Date.now();
+    hid.settleSince  = now;
     hid.settleCount  = 1;
     hid.settleLast   = r.lbs;
-    hid.settleExact  = 1;
     hid.settleSign   = 0;
     hid.settleMono   = 0;
+    startParkedRun(r.lbs, now);
     setScaleStatusLive('⚖ Settling…', '');
     return;
   }
   hid.settleCount++;
-  // Same raw reading twice running means the value is parked, not drifting.
-  // (Identical raw counts decode to identical floats, so == is exact here.)
-  // Otherwise track which way it moved: a reading that keeps stepping the same
+  // Track which way the reading moved: a reading that keeps stepping the same
   // direction is creeping, however small each step is, while a flickering last
   // digit reverses. That direction — not the size of the step — is what tells
-  // the two apart when the scale only reports once a second and there are
-  // barely any samples to judge from.
-  if (r.lbs === hid.settleLast) {
-    hid.settleExact++;
-    hid.settleSign = 0;
-    hid.settleMono = 0;
-  } else {
+  // the two apart when there are barely any samples to judge from.
+  //
+  // The direction survives identical readings in between. Polled ten times a
+  // second, a creep shows as a step, several repeats, then another step the
+  // same way — clearing the direction on every repeat would hide the trend
+  // completely. (Identical raw counts decode to identical floats, so !== is
+  // exact here.)
+  if (r.lbs !== hid.settleLast) {
     const sign = r.lbs > hid.settleLast ? 1 : -1;
-    hid.settleExact = 1;
     hid.settleMono  = (sign === hid.settleSign) ? hid.settleMono + 1 : 1;
     hid.settleSign  = sign;
   }
   hid.settleLast  = r.lbs;
+  // Separately, is the value parked — has every reading since the run began
+  // stayed inside one division of every other? A reading that widens the band
+  // past that starts a new run from itself. A run broken by a polled motion
+  // sample (pollScaleSettle) restarts here too.
+  //
+  // A reading that widens the band *within* the division — a value the run
+  // has not shown before — keeps the run but restarts its hold. Otherwise the
+  // first step of a creep would join the run with the hold already part-served
+  // and capture a division or two short of where the creep ends. A flicker pays
+  // this once, the first time it shows its second value; returning to a value
+  // already seen widens nothing and costs nothing.
+  if (hid.settleExact === 0) {
+    startParkedRun(r.lbs, now);
+  } else {
+    const lo = Math.min(hid.parkLo, r.lbs);
+    const hi = Math.max(hid.parkHi, r.lbs);
+    if (hi - lo <= HID_SETTLE_PARK_LBS) {
+      if (lo !== hid.parkLo || hi !== hid.parkHi) hid.exactSince = now;
+      hid.settleExact++;
+      hid.parkLo = lo;
+      hid.parkHi = hi;
+    } else {
+      startParkedRun(r.lbs, now);
+    }
+  }
 
-  const held    = Date.now() - hid.settleSince;
-  const parked  = hid.settleExact >= HID_SETTLE_REPORTS
-               && held >= HID_SETTLE_FAST_MS;
   // Two steps the same way is a trend, not noise — hold, whatever the timers say.
   const trending = hid.settleMono >= 2;
+  const held    = now - hid.settleSince;
+  const parked  = hid.settleExact >= HID_SETTLE_REPORTS
+               && now - hid.exactSince
+                  >= (trending ? HID_SETTLE_TREND_MS : HID_SETTLE_FAST_MS);
   const jittery = !trending
                && hid.settleCount >= HID_SETTLE_REPORTS_JITTER
                && held >= HID_SETTLE_MS;
@@ -2161,10 +2289,23 @@ setInterval(() => {
   setScaleStatus('⚠ Make sure scale is on.', 'warn');
 }, 5000);
 
-// Ask whether the platform has been cleared yet, rather than waiting for the
-// scale to mention it. Only while disarmed: while it is armed there is nothing
-// here the input stream is not already saying, and this costs a USB round trip
-// ten times a second.
+// A polled sample on an armed platform. Only stable, loaded readings go to the
+// settle window; anything else just breaks its run of identical readings, so a
+// parked value has to be seen again before it can capture. The rest — motion
+// streaks, faults, wrong units, rearming — stays with the input stream, which
+// sees every frame the scale sends rather than whichever one a snapshot caught.
+async function pollScaleSettle(r) {
+  if (r.status === HID_ST_STABLE && r.lbs !== null && r.lbs >= HID_MIN_CAPTURE_LBS) {
+    await settleScaleSample(r);
+    return;
+  }
+  hid.settleExact = 0;
+}
+
+// Ask the scale rather than waiting for it to speak: whether the platform has
+// been cleared yet while disarmed, and what an item settling on it reads while
+// armed. Armed with nothing on the platform there is nothing to learn, and this
+// costs a USB round trip ten times a second, so it stays quiet then.
 setInterval(async () => {
   if (!hid.device) return;
   // "Take the next item." The platform disarmed for a capture and has since come
@@ -2187,9 +2328,18 @@ setInterval(async () => {
     hid.readyOwed = false;
     readyBeep();
   }
-  // The clearance poll proper, which has nothing to learn while armed.
-  if (hid.armed || hid.pollBroken || hid.polling) return;
+  if (hid.pollBroken || hid.polling) return;
   if (!hid.reportId) return;   // nothing has streamed yet — no ID to ask on
+  // Armed, the poll is worth its round trips only while the scale is in use:
+  // something on the platform, or weighing recently enough that the next item
+  // is probably on its way (HID_POLL_ACTIVE_MS). Before the feature report is
+  // proven live these samples settle nothing — they are gathering that proof,
+  // which the motion of an item landing on the platform supplies.
+  const armed = hid.armed;
+  if (armed
+      && !(hid.lastLbs !== null && hid.lastLbs >= HID_MIN_CAPTURE_LBS)
+      && Date.now() - hid.lastChangeAt >= HID_POLL_ACTIVE_MS) return;
+  const seq = hid.inputSeq;
   hid.polling = true;
   let raw = null;
   try {
@@ -2205,16 +2355,26 @@ setInterval(async () => {
   // A feature report carries its ID as byte 0, where an input report's travels
   // on the event instead, so drop it and the same parser applies.
   if (!raw || raw.byteLength < 6) return;
-  if (hid.armed) return;   // an input frame beat us to it while we awaited
   const r = parseHidScaleReport(
     new DataView(raw.buffer, raw.byteOffset + 1, raw.byteLength - 1));
   if (!r) return;
-  // Deliberately narrow: this answers one question — is the platform clear —
-  // and nothing else. Faults, wrong units, settling and capture all stay with
-  // the input stream, which sees every frame the scale sends rather than
-  // whichever one this snapshot happened to catch. A re-zero or under-zero
-  // status is excluded for the same reason it is on the input path: it is a
-  // reading to complain about, not a clearance to act on.
+  notePolledSample(r);
+  // Armed or disarmed changed while we awaited — a capture or a rearm got there
+  // first, and this sample answers a question nobody is asking any more.
+  if (hid.armed !== armed) return;
+  if (armed) {
+    // An input frame that landed during the round trip is newer than this
+    // sample; feeding the older one in after it would read as a change.
+    if (!hid.pollLive || hid.inputSeq !== seq) return;
+    await pollScaleSettle(r);
+    return;
+  }
+  // Disarmed, this answers one question — is the platform clear — and nothing
+  // else. Faults, wrong units and the motion streak all stay with the input
+  // stream, which sees every frame the scale sends rather than whichever one
+  // this snapshot happened to catch. A re-zero or under-zero status is
+  // excluded for the same reason it is on the input path: it is a reading to
+  // complain about, not a clearance to act on.
   const clear = r.status === HID_ST_ZERO
              || ((r.status === HID_ST_MOTION || r.status === HID_ST_STABLE)
                  && r.lbs !== null && r.lbs < HID_MIN_CAPTURE_LBS);
@@ -2267,6 +2427,9 @@ async function openScaleNow(device) {
   hid.reportId     = 0;
   hid.polling      = false;
   hid.pollBroken   = false;
+  hid.pollLive     = false;
+  hid.pollUnseen.clear();
+  hid.inputKey     = null;
   resetSettle();
   device.addEventListener('inputreport', onScaleReport);
   // Not "ready" yet — nothing has been heard from it. Claiming ready before a
