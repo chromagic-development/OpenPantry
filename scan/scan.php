@@ -1540,8 +1540,8 @@ barcodeInput.addEventListener('keydown', async (e) => {
     await handleScaleWeight(code);
     return;
   }
-  // Letters present → this is a name query, not a barcode. Accept it only
-  // if it narrows the lookup tables to exactly one name.
+  // Letters present → this is a name query, not a barcode. Accept its top
+  // match.
   if (isNameQuery(code)) {
     await tryAcceptName(code);
     return;
@@ -1553,11 +1553,12 @@ barcodeInput.addEventListener('keydown', async (e) => {
 
 // ── Add-by-name type-ahead ───────────────────────────────────────────────
 // Typing letters into the barcode field searches the lookup-table names
-// (produce codes + cached UPCs). Once the text matches exactly one name,
-// Enter or Tab records that item via its PLU/UPC, same as a scan. A scanner
-// burst is all digits, so it never triggers this path.
+// (produce codes + cached UPCs). Enter or Tab records the top match — the one
+// printed large — via its PLU/UPC, same as a scan. A scanner burst is all
+// digits, so it never triggers this path.
 let nameMatches = [];      // matches currently rendered in the list
 let nameTotal = 0;         // total distinct names matched (may exceed list)
+let nameShownQ = null;     // query the rendered list answers
 let nameSearchTimer = null;
 let nameSearchSeq = 0;     // discard out-of-order responses
 const nameBox = $('nameMatches');
@@ -1569,6 +1570,7 @@ function hideNameMatches() {
   nameBox.innerHTML = '';
   nameMatches = [];
   nameTotal = 0;
+  nameShownQ = null;
 }
 
 barcodeInput.addEventListener('input', () => {
@@ -1589,6 +1591,7 @@ barcodeInput.addEventListener('input', () => {
       // "Missing barcode", which must not read as "no such item".
       nameMatches = [];
       nameTotal = 0;
+      nameShownQ = null;
       nameBox.innerHTML = '<div class="nm-hint">⚠ Name search unavailable: '
         + escape(r.error || 'server error') + '</div>';
       nameBox.style.display = 'block';
@@ -1596,6 +1599,7 @@ barcodeInput.addEventListener('input', () => {
     }
     nameMatches = r.matches || [];
     nameTotal   = r.total || nameMatches.length;
+    nameShownQ  = v;
     renderNameMatches();
   }, 200);
 });
@@ -1617,30 +1621,32 @@ function renderNameMatches() {
      </div>`).join('')
     + `<div class="nm-hint">${unique
         ? '↵ Press Enter or Tab to add this item'
-        : nameTotal + ' matches — keep typing to narrow to one, or tap the item.'}</div>`;
+        : '↵ Press Enter to add the top item — or keep typing, or tap another ('
+          + nameTotal + ' matches).'}</div>`;
   nameBox.style.display = 'block';
 }
 
-// Enter/Tab on a name query: re-query so the decision is never based on a
-// stale (still-debouncing) result, then accept only a unique match.
+// Enter/Tab on a name query accepts the top match. When the list on screen
+// answers exactly this text, that top row is what the operator is looking at,
+// so take it as shown. Otherwise the list is stale (Enter beat the debounce)
+// or absent — re-query and take the top of the fresh result instead.
 async function tryAcceptName(q) {
   clearTimeout(nameSearchTimer);
+  if (q === nameShownQ && nameMatches.length) {
+    await acceptNameMatch(0);
+    return;
+  }
   const r = await postJson('../api_scan.php', {action:'search', q});
   if (!r.ok) { flash(r.error || 'Name search failed', 'error'); return; }
   nameMatches = r.matches || [];
   nameTotal   = r.total || nameMatches.length;
-  if (nameTotal === 1) {
-    await acceptNameMatch(0);
-    return;
-  }
-  if (!nameTotal) {
+  if (!nameMatches.length) {
     // Dead end — flash('error') buzzes and clears the field, so the next
     // scan starts clean instead of appending to the failed query.
     flash('No lookup names match "' + q + '".', 'error');
     return;
   }
-  renderNameMatches();
-  flash(nameTotal + ' names match — keep typing to narrow to one.', 'info');
+  await acceptNameMatch(0);
 }
 
 async function acceptNameMatch(i) {
@@ -2658,6 +2664,7 @@ $('pluPrompt').addEventListener('click', (e) => {
 // its code in the field and records it exactly as a scanned code would.
 let pluMatches = [];       // matches currently rendered in the list
 let pluTotal = 0;          // total distinct names matched (may exceed list)
+let pluShownQ = null;      // query the rendered list answers
 let pluSearchTimer = null;
 let pluSearchSeq = 0;      // discard out-of-order responses
 const pluBox   = $('pluMatches');
@@ -2668,6 +2675,7 @@ function hidePluMatches() {
   pluBox.innerHTML = '';
   pluMatches = [];
   pluTotal = 0;
+  pluShownQ = null;
 }
 
 // Back to a bare numeric field: no list, digit styling, keypad keyboard.
@@ -2706,6 +2714,7 @@ pluInput.addEventListener('input', () => {
       // A server error must not read as "no such item" — say which it is.
       pluMatches = [];
       pluTotal = 0;
+      pluShownQ = null;
       pluBox.innerHTML = '<div class="nm-hint">⚠ Name search unavailable: '
         + escape(r.error || 'server error') + '</div>';
       pluBox.style.display = 'block';
@@ -2713,6 +2722,7 @@ pluInput.addEventListener('input', () => {
     }
     pluMatches = r.matches || [];
     pluTotal   = r.total || pluMatches.length;
+    pluShownQ  = v;
     renderPluMatches();
   }, 200);
 });
@@ -2731,7 +2741,8 @@ function renderPluMatches() {
      </div>`).join('')
     + `<div class="nm-hint">${unique
         ? '↵ Press Enter to record this item with the weight above'
-        : pluTotal + ' matches — keep typing to narrow to one, or tap the item.'}</div>`;
+        : '↵ Press Enter to record the top item — or keep typing, or tap another ('
+          + pluTotal + ' matches).'}</div>`;
   pluBox.style.display = 'block';
 }
 
@@ -2744,10 +2755,11 @@ async function acceptPluMatch(i) {
   await submitPlu();
 }
 
-// Enter on a name: re-query so the decision is never made on a stale (still
-// debouncing) result, then accept only a unique match.
+// Enter on a name accepts the top match — as shown when the list on screen
+// answers exactly this text, otherwise from a fresh query (see tryAcceptName).
 async function tryAcceptPluName(q) {
   clearTimeout(pluSearchTimer);
+  if (q === pluShownQ && pluMatches.length) { await acceptPluMatch(0); return; }
   const r = await postJson('../api_scan.php', {action:'search', q, scope:'weighed'});
   if (!r.ok) {
     pluError(r.error || 'Name search failed — scan or type the PLU instead.');
@@ -2756,8 +2768,7 @@ async function tryAcceptPluName(q) {
   }
   pluMatches = r.matches || [];
   pluTotal   = r.total || pluMatches.length;
-  if (pluTotal === 1) { await acceptPluMatch(0); return; }
-  if (!pluTotal) {
+  if (!pluMatches.length) {
     // Buzzes: the operator is looking at the scale, not the screen. The list is
     // dropped so the same "no matches" line isn't stacked twice.
     hidePluMatches();
@@ -2766,9 +2777,7 @@ async function tryAcceptPluName(q) {
     pluInput.focus();
     return;
   }
-  renderPluMatches();
-  pluNote(pluTotal + ' items match — keep typing to narrow to one, or tap one.');
-  pluInput.focus();
+  await acceptPluMatch(0);
 }
 
 // Every scan comes through here — the barcode field, the camera, the PLU window
