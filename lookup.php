@@ -19,6 +19,7 @@
 //           scan the same new UPC at once.
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/openai.php';
 
 // ── Store-printed item labels (prefix 2) ────────────────────────
 // A retail scale prints its own UPC-A label for anything sold by the pound or
@@ -512,13 +513,11 @@ function mapGenericViaOpenAI(string $brandName, string $apiKey, string $model): 
 
     $payload = [
         'model' => $model,
-        'temperature' => 0,
-        'max_tokens' => 20,
         'messages' => [
             ['role' => 'system', 'content' => $sys],
             ['role' => 'user',   'content' => "Map this product name to a generic: " . $brandName],
         ],
-    ];
+    ] + openAIChatOptions($model, 20, 0);
     return openAIRequest('https://api.openai.com/v1/chat/completions', $payload, $apiKey);
 }
 
@@ -567,11 +566,9 @@ function openAIRequest(string $url, array $payload, string $apiKey): array {
 function openAIChatText(array $messages, string $apiKey, string $model,
                         int $maxTokens = 700, float $temperature = 0.4): array {
     $payload = [
-        'model'       => $model,
-        'temperature' => $temperature,
-        'max_tokens'  => $maxTokens,
-        'messages'    => $messages,
-    ];
+        'model'    => $model,
+        'messages' => $messages,
+    ] + openAIChatOptions($model, $maxTokens, $temperature);
     $raw = openAIRawRequest('https://api.openai.com/v1/chat/completions', $payload, $apiKey);
     if ($raw['body'] === null) return ['text' => null, 'error' => $raw['error']];
     $data = json_decode($raw['body'], true);

@@ -31,6 +31,7 @@
 $GLOBALS['FS_PREFIX'] = '../';
 require_once __DIR__ . '/../common.php';
 require_once __DIR__ . '/../auth.php';
+require_once __DIR__ . '/../openai.php';
 require_once __DIR__ . '/db.php';
 requireLogin();
 
@@ -98,7 +99,6 @@ function callOpenAIVision(string $apiKey, string $model, string $userPrompt, str
     $payload = json_encode([
         'model' => $model,
         'response_format' => ['type' => 'json_object'],
-        'temperature' => $temperature,
         'messages' => [
             [
                 'role' => 'system',
@@ -129,7 +129,7 @@ function callOpenAIVision(string $apiKey, string $model, string $userPrompt, str
                 ],
             ],
         ],
-    ]);
+    ] + openAIChatOptions($model, null, $temperature));
 
     $ch = curl_init('https://api.openai.com/v1/chat/completions');
     curl_setopt_array($ch, [

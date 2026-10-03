@@ -289,6 +289,7 @@ openpantry/
 ├── crypto.php         library: field-level encryption + password hashing
 ├── common.php         library: header/nav/styles + station cookie + team scanning
 ├── lookup.php         library: barcode → generic name (OFF + OpenAI)
+├── openai.php         library: per-model OpenAI params (output cap, reasoning off)
 ├── mailer.php         library: dependency-free SMTP / mail() sender
 ├── ratelimit.php      library: login throttle + emailed soft-lock codes
 ├── api_order.php      JSON: start/end/cancel orders + assist join/leave/sync
