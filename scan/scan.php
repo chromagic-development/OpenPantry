@@ -495,13 +495,13 @@ renderHead('Scan');
               border-top: 1px solid var(--border); }
     .nm-row:first-child { border-top: none; }
     .nm-row:hover { background: var(--cat-bg); }
-    /* Exactly one match left — highlight it so the operator knows Enter/Tab
-       will accept it. */
-    .nm-row.nm-unique { background: rgba(139,175,58,.14); }
     .nm-name { font-weight: 700; color: var(--brown); }
-    /* Top match at 2× size — a big, easy tap target (name and PLU lists). */
-    #nameMatches .nm-row:first-child .nm-name,
-    #pluMatches .nm-row:first-child .nm-name { font-size: 2em; line-height: 1.1; }
+    /* The match Enter/Tab will take: the top one until the arrow keys move it.
+       Tinted and at 2× size, so it reads from a step back and is a big, easy
+       tap target (name and PLU lists). */
+    .nm-row.nm-sel { background: rgba(139,175,58,.14); }
+    #nameMatches .nm-row.nm-sel .nm-name,
+    #pluMatches .nm-row.nm-sel .nm-name { font-size: 2em; line-height: 1.1; }
     .nm-brand { font-size: .75rem; color: #777; }
     .nm-code { font-family: monospace; color: #777; margin-left: auto; }
     .nm-hint { padding: 8px 14px; font-size: .75rem; color: #777;
@@ -1526,6 +1526,14 @@ barcodeInput.addEventListener('keydown', async (e) => {
     hideNameMatches();
     return;
   }
+  // ↑/↓ choose which match Enter will take. Only while a list of matches is
+  // showing — otherwise the keys keep their usual meaning in the field.
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && nameMatches.length) {
+    e.preventDefault();
+    nameSel = moveMatchSel(nameBox, nameSel, nameMatches.length,
+                           e.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
   // Accept either Enter or Tab as the scanner's terminator.
   if (e.key !== 'Enter' && e.key !== 'Tab') return;
   e.preventDefault();
@@ -1540,8 +1548,8 @@ barcodeInput.addEventListener('keydown', async (e) => {
     await handleScaleWeight(code);
     return;
   }
-  // Letters present → this is a name query, not a barcode. Accept its top
-  // match.
+  // Letters present → this is a name query, not a barcode. Accept the
+  // selected match — the top one unless the arrow keys moved it.
   if (isNameQuery(code)) {
     await tryAcceptName(code);
     return;
@@ -1553,12 +1561,13 @@ barcodeInput.addEventListener('keydown', async (e) => {
 
 // ── Add-by-name type-ahead ───────────────────────────────────────────────
 // Typing letters into the barcode field searches the lookup-table names
-// (produce codes + cached UPCs). Enter or Tab records the top match — the one
-// printed large — via its PLU/UPC, same as a scan. A scanner burst is all
-// digits, so it never triggers this path.
+// (produce codes + cached UPCs). Enter or Tab records the selected match — the
+// one printed large, the top one until ↑/↓ move it — via its PLU/UPC, same as
+// a scan. A scanner burst is all digits, so it never triggers this path.
 let nameMatches = [];      // matches currently rendered in the list
 let nameTotal = 0;         // total distinct names matched (may exceed list)
 let nameShownQ = null;     // query the rendered list answers
+let nameSel = 0;           // index of the row Enter will take
 let nameSearchTimer = null;
 let nameSearchSeq = 0;     // discard out-of-order responses
 const nameBox = $('nameMatches');
@@ -1571,6 +1580,18 @@ function hideNameMatches() {
   nameMatches = [];
   nameTotal = 0;
   nameShownQ = null;
+  nameSel = 0;
+}
+
+// Move the selected row of a match list (name or PLU) by `step`, stopping at
+// either end, and return the new index. Only the classes change — the rows
+// themselves stay put, so a tap still lands on the row under the finger.
+function moveMatchSel(box, sel, count, step) {
+  const next = Math.max(0, Math.min(count - 1, sel + step));
+  const rows = box.querySelectorAll('.nm-row');
+  rows.forEach((r, k) => r.classList.toggle('nm-sel', k === next));
+  if (rows[next]) rows[next].scrollIntoView({ block: 'nearest' });
+  return next;
 }
 
 barcodeInput.addEventListener('input', () => {
@@ -1600,6 +1621,7 @@ barcodeInput.addEventListener('input', () => {
     nameMatches = r.matches || [];
     nameTotal   = r.total || nameMatches.length;
     nameShownQ  = v;
+    nameSel     = 0;      // new text, new list: back to the best match
     renderNameMatches();
   }, 200);
 });
@@ -1612,7 +1634,7 @@ function renderNameMatches() {
   }
   const unique = nameTotal === 1;
   nameBox.innerHTML = nameMatches.map((m, i) =>
-    `<div class="nm-row${unique ? ' nm-unique' : ''}" onclick="acceptNameMatch(${i})">
+    `<div class="nm-row${i === nameSel ? ' nm-sel' : ''}" onclick="acceptNameMatch(${i})">
        <div>
          <div class="nm-name">${escape(m.name)}</div>
          ${m.brand ? '<div class="nm-brand">' + escape(m.brand) + '</div>' : ''}
@@ -1621,19 +1643,20 @@ function renderNameMatches() {
      </div>`).join('')
     + `<div class="nm-hint">${unique
         ? '↵ Press Enter or Tab to add this item'
-        : '↵ Press Enter to add the top item — or keep typing, or tap another ('
+        : '↵ Enter adds the large item — ↑↓ to choose another, keep typing, or tap one ('
           + nameTotal + ' matches).'}</div>`;
   nameBox.style.display = 'block';
 }
 
-// Enter/Tab on a name query accepts the top match. When the list on screen
-// answers exactly this text, that top row is what the operator is looking at,
-// so take it as shown. Otherwise the list is stale (Enter beat the debounce)
-// or absent — re-query and take the top of the fresh result instead.
+// Enter/Tab on a name query accepts the selected match. When the list on
+// screen answers exactly this text, the large row is what the operator is
+// looking at — and may have picked with the arrows — so take it as shown.
+// Otherwise the list is stale (Enter beat the debounce) or absent; re-query
+// and take the top of the fresh result instead.
 async function tryAcceptName(q) {
   clearTimeout(nameSearchTimer);
   if (q === nameShownQ && nameMatches.length) {
-    await acceptNameMatch(0);
+    await acceptNameMatch(nameSel);
     return;
   }
   const r = await postJson('../api_scan.php', {action:'search', q});
@@ -2635,6 +2658,13 @@ async function submitPlu() {
 $('pluInput').addEventListener('keydown', (e) => {
   // Enter and Tab both terminate a scan, same as the main barcode field.
   if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); submitPlu(); return; }
+  // ↑/↓ choose which name match Enter will take, as in the scan box.
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && pluMatches.length) {
+    e.preventDefault();
+    pluSel = moveMatchSel(pluBox, pluSel, pluMatches.length,
+                          e.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     $('pluInput').value = '';
@@ -2665,6 +2695,7 @@ $('pluPrompt').addEventListener('click', (e) => {
 let pluMatches = [];       // matches currently rendered in the list
 let pluTotal = 0;          // total distinct names matched (may exceed list)
 let pluShownQ = null;      // query the rendered list answers
+let pluSel = 0;            // index of the row Enter will take
 let pluSearchTimer = null;
 let pluSearchSeq = 0;      // discard out-of-order responses
 const pluBox   = $('pluMatches');
@@ -2676,6 +2707,7 @@ function hidePluMatches() {
   pluMatches = [];
   pluTotal = 0;
   pluShownQ = null;
+  pluSel = 0;
 }
 
 // Back to a bare numeric field: no list, digit styling, keypad keyboard.
@@ -2723,6 +2755,7 @@ pluInput.addEventListener('input', () => {
     pluMatches = r.matches || [];
     pluTotal   = r.total || pluMatches.length;
     pluShownQ  = v;
+    pluSel     = 0;       // new text, new list: back to the best match
     renderPluMatches();
   }, 200);
 });
@@ -2735,13 +2768,13 @@ function renderPluMatches() {
   }
   const unique = pluTotal === 1;
   pluBox.innerHTML = pluMatches.map((m, i) =>
-    `<div class="nm-row${unique ? ' nm-unique' : ''}" onclick="acceptPluMatch(${i})">
+    `<div class="nm-row${i === pluSel ? ' nm-sel' : ''}" onclick="acceptPluMatch(${i})">
        <div class="nm-name">${escape(m.name)}</div>
        <div class="nm-code">${escape(m.code)}</div>
      </div>`).join('')
     + `<div class="nm-hint">${unique
         ? '↵ Press Enter to record this item with the weight above'
-        : '↵ Press Enter to record the top item — or keep typing, or tap another ('
+        : '↵ Enter records the large item — ↑↓ to choose another, keep typing, or tap one ('
           + pluTotal + ' matches).'}</div>`;
   pluBox.style.display = 'block';
 }
@@ -2755,11 +2788,12 @@ async function acceptPluMatch(i) {
   await submitPlu();
 }
 
-// Enter on a name accepts the top match — as shown when the list on screen
-// answers exactly this text, otherwise from a fresh query (see tryAcceptName).
+// Enter on a name accepts the selected match — as shown when the list on
+// screen answers exactly this text, otherwise the top of a fresh query (see
+// tryAcceptName).
 async function tryAcceptPluName(q) {
   clearTimeout(pluSearchTimer);
-  if (q === pluShownQ && pluMatches.length) { await acceptPluMatch(0); return; }
+  if (q === pluShownQ && pluMatches.length) { await acceptPluMatch(pluSel); return; }
   const r = await postJson('../api_scan.php', {action:'search', q, scope:'weighed'});
   if (!r.ok) {
     pluError(r.error || 'Name search failed — scan or type the PLU instead.');

@@ -137,10 +137,11 @@ E.append(body(
     "You can add the item by typing its <b>name</b> instead. The entry box is "
     "labeled <b>Barcode or Item Name</b> — start typing and, after two "
     "letters, matching items from the catalog appear beneath it as you type. "
-    "Press <b>Enter</b> (or Tab) to record the best match, exactly as if "
-    "you'd scanned it — it is always first and printed twice as large, so it "
-    "is also an easy tap on a touch screen. To pick a different one, keep "
-    "typing or tap it in the list. Digits on their own are still "
+    "The item printed twice as large is the one <b>Enter</b> (or Tab) will "
+    "record, exactly as if you'd scanned it — the best match, at the top, "
+    "until you press the <b>up/down arrow keys</b> to move the large print to "
+    "another item. You can also keep typing to narrow the list, or just tap "
+    "an item. Digits on their own are still "
     "treated as a barcode, so typing a name never interferes with the "
     "scanner."))
 E.append(good("FASTEST FIX FOR A TORN OR MISSING BARCODE",
