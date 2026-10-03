@@ -630,7 +630,7 @@ renderNav('report');
     <?php endif; ?>
   </div>
 
-  <div class="card no-print">
+  <div class="card no-print" id="unscanned">
     <h2>Days Not Scanned</h2>
     <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
       List days the pantry <strong>operated but nothing was scanned</strong> —
@@ -646,9 +646,17 @@ renderNav('report');
     </p>
     <form method="post" action="../../api_unscanned.php" class="row" style="margin-bottom:14px;">
       <input type="hidden" name="action" value="add">
+      <input type="hidden" name="return" value="<?= htmlspecialchars($_SERVER['QUERY_STRING'] ?? '') ?>">
+      <?php // Both default to today, so a single missed day is still one click. ?>
       <div>
-        <label for="usDay">Date</label>
-        <input type="date" id="usDay" name="day" required max="<?= date('Y-m-d') ?>">
+        <label for="usStart">Start date</label>
+        <input type="date" id="usStart" name="start" required
+               value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>">
+      </div>
+      <div>
+        <label for="usEnd">End date</label>
+        <input type="date" id="usEnd" name="end" required
+               value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>">
       </div>
       <div style="flex:2 1 220px;">
         <label for="usNote">Note (optional)</label>
@@ -664,12 +672,33 @@ renderNav('report');
     // Read defensively: on a partial deploy (PHP files uploaded ahead of
     // schema.sql) the table won't exist yet, and the panel should degrade to
     // empty rather than fataling the whole report.
-    $uRows = [];
+    //
+    // Paged newest-first, 30 days at a time, so years of entries don't bury the
+    // rest of the report. us_page rides in the query string alongside the
+    // report's own filters, and an out-of-range page clamps to the last one.
+    $uPerPage = 30;
+    $uRows    = [];
+    $uTotal   = 0;
+    $uPage    = 1;
+    $uPages   = 1;
     try {
-        $uRows = $db->query("SELECT day, note FROM unscanned_days ORDER BY day DESC")->fetchAll();
+        $uTotal = (int)$db->query("SELECT COUNT(*) FROM unscanned_days")->fetchColumn();
+        $uPages = max(1, (int)ceil($uTotal / $uPerPage));
+        $uPage  = min($uPages, max(1, (int)($_GET['us_page'] ?? 1)));
+        $uStmt  = $db->prepare("SELECT day, note FROM unscanned_days ORDER BY day DESC LIMIT ? OFFSET ?");
+        $uStmt->execute([$uPerPage, ($uPage - 1) * $uPerPage]);
+        $uRows  = $uStmt->fetchAll();
     } catch (\Throwable $e) {
-        $uRows = [];
+        $uRows  = [];
+        $uTotal = 0;
+        $uPages = 1;
     }
+    $uPageUrl = function (int $p): string {
+        $q = $_GET;
+        if ($p > 1) $q['us_page'] = $p; else unset($q['us_page']);
+        $qs = http_build_query($q);
+        return ($qs !== '' ? '?' . $qs : '?') . '#unscanned';
+    };
     ?>
     <?php if ($uRows): ?>
     <table class="data">
@@ -687,6 +716,7 @@ renderNav('report');
               <form method="post" action="../../api_unscanned.php" style="display:inline;">
                 <input type="hidden" name="action" value="delete">
                 <input type="hidden" name="day" value="<?= htmlspecialchars($u['day']) ?>">
+                <input type="hidden" name="return" value="<?= htmlspecialchars($_SERVER['QUERY_STRING'] ?? '') ?>">
                 <button class="btn btn-secondary" style="padding:4px 10px; font-size:.8rem;">Remove</button>
               </form>
             </td>
@@ -694,6 +724,28 @@ renderNav('report');
         <?php endforeach; ?>
       </tbody>
     </table>
+    <?php if ($uPages > 1):
+        $uFirst = ($uPage - 1) * $uPerPage + 1;
+        $uLast  = $uFirst + count($uRows) - 1;
+    ?>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:12px; flex-wrap:wrap;">
+      <div style="display:flex; gap:6px;">
+        <?php if ($uPage > 1): ?>
+          <a class="btn btn-secondary" href="<?= htmlspecialchars($uPageUrl(1)) ?>" title="Most recent days">&laquo; Newest</a>
+          <a class="btn btn-secondary" href="<?= htmlspecialchars($uPageUrl($uPage - 1)) ?>">&lsaquo; Newer</a>
+        <?php endif; ?>
+      </div>
+      <span style="color:#777; font-size:.85rem;">
+        <?= $uFirst ?>–<?= $uLast ?> of <?= $uTotal ?> days &middot; page <?= $uPage ?> of <?= $uPages ?>
+      </span>
+      <div style="display:flex; gap:6px;">
+        <?php if ($uPage < $uPages): ?>
+          <a class="btn btn-secondary" href="<?= htmlspecialchars($uPageUrl($uPage + 1)) ?>">Older &rsaquo;</a>
+          <a class="btn btn-secondary" href="<?= htmlspecialchars($uPageUrl($uPages)) ?>" title="Earliest days">Oldest &raquo;</a>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php endif; ?>
     <?php else: ?>
       <p style="color:#777;">No missed scanning days recorded.</p>
     <?php endif; ?>
@@ -1202,6 +1254,43 @@ function recordEmailOrderTime() {
   }
   updateCrateTotal();
   syncRestockMaster();
+})();
+
+// Days Not Scanned range. End follows Start until the operator sets End
+// themselves, so a single missed day is just "pick Start, Add". Once End has
+// been touched it is left alone, and an End before Start is refused with a
+// message rather than silently swapped (the server still swaps one that slips
+// through, e.g. with scripting off). `min` greys out the invalid days in the
+// picker; the custom message is what explains why.
+(function () {
+  var start = document.getElementById('usStart');
+  var end   = document.getElementById('usEnd');
+  if (!start || !end) return;
+  // A browser that refilled the form on reload or Back may hand back an End
+  // that differs from Start, which can only mean someone chose it.
+  var endTouched = end.value !== start.value;
+
+  function check() {
+    end.min = start.value;
+    end.setCustomValidity(start.value && end.value && end.value < start.value
+      ? 'End date can’t be before the start date.' : '');
+  }
+
+  start.addEventListener('input', function () {
+    if (!endTouched && start.value) end.value = start.value;
+    check();
+  });
+  start.addEventListener('change', function () {
+    if (!end.checkValidity()) end.reportValidity();
+  });
+  end.addEventListener('input', function () {
+    endTouched = true;
+    check();
+  });
+  end.addEventListener('change', function () {
+    if (!end.checkValidity()) end.reportValidity();
+  });
+  check();
 })();
 </script>
 <?php renderFoot(); ?>
