@@ -179,6 +179,14 @@ renderHead('Scan');
       <button id="scaleConnect" type="button" class="btn btn-secondary scale-btn">⚖ Connect Scale</button>
     </div>
 
+    <!-- Up whenever this page can't hear the scanner: another window or a
+         system dialog has the keyboard, so a scan would go nowhere without a
+         sound. Tapping anywhere on the page (this included) takes it back. -->
+    <div id="scanNotReady" class="banner error" role="alert"
+         style="display:none; cursor:pointer; font-weight:700;">
+      ⚠ This page is not receiving the scanner — tap here, then scan again.
+    </div>
+
     <label for="barcodeInput">Barcode or Item Name</label>
     <input type="text" id="barcodeInput" autocomplete="off" autocapitalize="off"
            autocorrect="off" spellcheck="false"
@@ -939,13 +947,16 @@ document.addEventListener('focusin', (e) => {
 window.addEventListener('load', refocus);
 
 // Periodic safety net — some scanners send a fast burst right after page load
-// or after Start Order while focus is still on the button.
+// or after Start Order while focus is still on the button. Only a field that
+// takes typing keeps focus from it; the beep switch is an <input> too, and
+// exempting every <input> let a tapped switch hold focus indefinitely.
 setInterval(() => {
   if (document.activeElement !== barcodeInput
       && !modalOpen()
-      && document.activeElement.tagName !== 'INPUT') {
+      && !isTextEntry(document.activeElement)) {
     refocus();
   }
+  updateScanReady();
 }, 500);
 
 // Outstanding non-sync requests. The team-sync poll skips a tick while any are
@@ -1520,7 +1531,10 @@ $('scanTable').addEventListener('click', async (e) => {
   }
 });
 
-barcodeInput.addEventListener('keydown', async (e) => {
+// The barcode field's own keys. The stray-key catcher below also hands it a
+// terminator that arrived while focus was elsewhere, so it works from the
+// field's value alone and never assumes the field has focus.
+async function onBarcodeKeydown(e) {
   if (e.key === 'Escape') {
     barcodeInput.value = '';
     hideNameMatches();
@@ -1538,7 +1552,13 @@ barcodeInput.addEventListener('keydown', async (e) => {
   if (e.key !== 'Enter' && e.key !== 'Tab') return;
   e.preventDefault();
   const code = barcodeInput.value.trim();
-  if (!code) return;
+  // Judged before this terminator is marked, so it sees the burst it ends.
+  const lost = looksLikeLostBurst();
+  lastTerminatorAt = Date.now();
+  if (!code) {
+    if (lost) scanLostOnTheWay();
+    return;
+  }
   // A scale transmission lands in this field whenever no modal has focus. It
   // always carries a unit suffix ("1.120lb"), and no barcode or lookup name
   // looks like that, so it can be split off before the name-query branch.
@@ -1546,6 +1566,17 @@ barcodeInput.addEventListener('keydown', async (e) => {
     barcodeInput.value = '';
     hideNameMatches();
     await handleScaleWeight(code);
+    return;
+  }
+  // One or two digits on their own: a count for the item just added (see
+  // handleCount). No barcode or PLU is that short, so nothing else wants this
+  // text — except the tail of a scan whose first digits were swallowed, which
+  // must buzz as a lost scan rather than multiply the previous item.
+  if (isCountEntry(code)) {
+    barcodeInput.value = '';
+    hideNameMatches();
+    if (lost) { lastAdded = null; scanLostOnTheWay(); return; }
+    await handleCount(Number(code));
     return;
   }
   // Letters present → this is a name query, not a barcode. Accept the
@@ -1557,7 +1588,126 @@ barcodeInput.addEventListener('keydown', async (e) => {
   barcodeInput.value = '';
   hideNameMatches();
   await handleScan(code);
-});
+}
+barcodeInput.addEventListener('keydown', onBarcodeKeydown);
+
+// ── Keeping the scanner connected ────────────────────────────────────────
+// A USB laser scanner is a keyboard: it types the digits and presses Enter,
+// and the scan only counts if those keystrokes land in the barcode field. Where
+// they land instead, nothing happens — no buzz, no banner, no row — which is
+// how a helper tablet could stop adding items with nothing on either screen to
+// say so. Three guards, one per way the keystrokes can go astray:
+//
+//  1. Focus somewhere else on the page. The catcher below sends a stray
+//     character into the field and a stray Enter/Tab through the field's own
+//     handler, so the scan records wherever focus happened to be.
+//  2. The field holds focus but its typing doesn't arrive. Chrome on Android
+//     can lose the link between a hardware keyboard and the focused field —
+//     after the screen sleeps, or the scanner re-enumerates on the USB port —
+//     while still reporting the field as focused, so the safety net above sees
+//     nothing to fix. Waking the page drops focus and takes it again, which
+//     re-makes that link. If the digits are swallowed anyway but the Enter gets
+//     through, looksLikeLostBurst() catches it and buzzes.
+//  3. The page itself has lost the keyboard to another window or a system
+//     dialog. Nothing in a page can take that back, so #scanNotReady says it
+//     plainly until someone taps.
+//
+// None of this reaches a scanner Android itself has stopped hearing (a USB port
+// powered down in sleep): those keystrokes never arrive at the browser at all.
+
+const LOST_BURST_KEYS   = 4;      // character keys that make a burst a scan
+const LOST_BURST_MS     = 1000;   // a scanner types a whole code inside this
+const LOST_BURST_GAP_MS = 300;    // ...and presses Enter this soon after it
+let keyTimes = [];                // recent character keydowns, any target
+let lastTerminatorAt = 0;         // the last Enter/Tab/Escape anywhere
+
+// A control that takes typing, as opposed to a button or a switch. Keys aimed
+// at one of these are the operator's, not stray scanner output.
+function isTextEntry(el) {
+  if (!el) return false;
+  if (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+  return el.tagName === 'INPUT'
+      && !/^(checkbox|radio|button|submit|reset|range|color|file|image)$/i.test(el.type);
+}
+
+// Did character keys arrive in a scanner-speed burst ending just now, with
+// nothing in the field to show for them? 'Unidentified' / 229 is what Chrome on
+// Android reports for a key the keyboard layer took over, so those count too.
+// The gap test keeps it to scanners: a person who tapped a name match and then
+// pressed Enter on the emptied field took longer than that.
+function looksLikeLostBurst() {
+  const now = Date.now();
+  const since = Math.max(lastTerminatorAt, now - LOST_BURST_MS);
+  const recent = keyTimes.filter((t) => t > since);
+  return recent.length >= LOST_BURST_KEYS
+      && now - recent[recent.length - 1] < LOST_BURST_GAP_MS;
+}
+
+function scanLostOnTheWay() {
+  flash('A scan reached this page but not the barcode box, so nothing was '
+      + 'recorded. Scan that item again.', 'error');
+  resetScanFocus();
+}
+
+// Drop focus and take it again: re-makes the keyboard's link to the field
+// (guard 2) without touching what is typed in it.
+function resetScanFocus() {
+  if (modalOpen() || state.scanner) return;
+  barcodeInput.blur();
+  barcodeInput.focus();
+}
+
+function updateScanReady() {
+  // With the camera running the laser scanner isn't this page's input.
+  const lost = !document.hasFocus() && !state.scanner;
+  $('scanNotReady').style.display = lost ? '' : 'none';
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const k = e.key || '';
+  if (k.length === 1 || k === 'Unidentified' || e.keyCode === 229) {
+    keyTimes.push(Date.now());
+    if (keyTimes.length > 64) keyTimes.shift();
+  }
+  if (k === 'Escape') { lastTerminatorAt = Date.now(); return; }
+  if (e.target === barcodeInput) return;   // the field's own handler has it
+  const terminator = k === 'Enter' || k === 'Tab';
+  // A modal's field, or anywhere else text is typed: the operator's keys.
+  if (modalOpen() || isTextEntry(e.target)) {
+    if (terminator) lastTerminatorAt = Date.now();
+    return;
+  }
+  if (terminator) {
+    // Only with a code waiting: a bare Enter on a focused button still
+    // presses it, but one ending a scan must not press End Order.
+    if (barcodeInput.value.trim()) onBarcodeKeydown(e);
+    else lastTerminatorAt = Date.now();
+    return;
+  }
+  // A stray character: into the field it goes, and focus with it so the rest
+  // of the burst lands there natively. Not a space — barcodes have none, and
+  // a space on a focused button or switch is someone pressing it.
+  if (k.length === 1 && k !== ' ') {
+    e.preventDefault();
+    refocus();
+    const start = barcodeInput.selectionStart ?? barcodeInput.value.length;
+    const end   = barcodeInput.selectionEnd   ?? barcodeInput.value.length;
+    barcodeInput.setRangeText(k, start, end, 'end');
+    barcodeInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}, true);
+
+// Guard 2: coming back from a sleeping screen, another app, or the back-
+// forward cache. The short delay lets Chrome finish restoring the page first.
+function onScanPageWake() {
+  updateScanReady();
+  setTimeout(resetScanFocus, 150);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) onScanPageWake(); });
+window.addEventListener('focus', (e) => { if (e.target === window) onScanPageWake(); });
+window.addEventListener('blur',  (e) => { if (e.target === window) updateScanReady(); });
+window.addEventListener('pageshow', (e) => { if (e.persisted) onScanPageWake(); });
 
 // ── Add-by-name type-ahead ───────────────────────────────────────────────
 // Typing letters into the barcode field searches the lookup-table names
@@ -1679,6 +1829,65 @@ async function acceptNameMatch(i) {
   hideNameMatches();
   await handleScan(m.code);   // records via the item's PLU/UPC, same as a scan
   refocus();
+}
+
+// ── Count after an item: "Canned Beets", then 6 ──────────────────────────
+// A number from 1 to 15 entered on its own right after an item is scanned or
+// added by name means "this many of it in all". The item already went in once,
+// so the number less one more are added — each its own row, exactly as if the
+// item had been scanned that many times. One request writes them all or none.
+//
+// A count applies once, to the item this station added last: another scan or
+// command code, a removal of that row (here, by 990003, or by a teammate), or
+// the end of the order all leave nothing for a number to multiply. Weighed
+// produce is refused — every one of those is weighed on its own.
+const COUNT_MAX = 15;
+let lastAdded = null;   // { barcode, name, kind, scanId, orderId } — see afterRecord
+
+function isCountEntry(v) { return /^\d{1,2}$/.test(v); }
+
+async function handleCount(n) {
+  if (n < 1 || n > COUNT_MAX) {
+    // Not taken as a count, so the item stays available for the right number.
+    flash('Enter a count from 1 to ' + COUNT_MAX + ' right after an item.', 'error');
+    return;
+  }
+  const last = lastAdded;
+  lastAdded = null;
+  const row = last && last.scanId
+    && $('scanTable').querySelector('tbody tr[data-scan-id="' + last.scanId + '"]');
+  if (!last || last.orderId !== state.orderId || !row) {
+    flash('Scan or enter an item first, then enter how many of it in all.', 'error');
+    return;
+  }
+  if (last.kind === 'produce') {
+    flash(last.name + ' is weighed — weigh each one instead of entering a count.', 'error');
+    return;
+  }
+  if (n === 1) {
+    flash('1 ' + last.name + ' — already on this order.', 'info');
+    return;
+  }
+  const label = n + ' × ' + last.name;
+  if (net.down) { refuseWhileDown(label); return; }
+  let rec;
+  try {
+    rec = await postJson('../api_scan.php',
+      {action: 'record', barcode: last.barcode, copies: n - 1});
+  } catch (e) {
+    if (!(e instanceof NetError)) throw e;
+    // All-or-none on the server, so "maybe" means all of them or none.
+    noteLostItem(label, e.action === 'record' && !e.notSent);
+    return;
+  }
+  if (!rec.ok) { afterRecord(rec); return; }
+  if (state.role === 'assist' && state.scanBeep && !state.scanner) scanBeep();
+  const items = rec.items || [rec.item];
+  items.forEach((it) => appendRow(it));
+  bumpStats(rec.item, rec.scan_count);
+  showLast(last.name, last.barcode, n + ' in all');
+  flash('Added ' + (n - 1) + ' more ' + last.name + ' — ' + n + ' in all.', 'info',
+        { style: 'success' });
 }
 
 // Visual indicator: highlight the input when it has focus so the operator
@@ -2830,6 +3039,9 @@ async function handleScan(code) {
 }
 
 async function scanItem(code) {
+  // Whatever this turns out to be — another item, a command code, a mis-scan —
+  // a count typed after it no longer means the item before it.
+  lastAdded = null;
   // Reserved command barcode: 990001 acts as the End Order trigger so the
   // operator can finish an order without touching the screen.
   if (code === '990001') {
@@ -3410,6 +3622,8 @@ function afterRecord(rec) {
     it.kind === 'produce' ? it.weight_lbs + ' lb' : 'qty ' + it.quantity);
   appendRow(it);
   bumpStats(it, rec.scan_count);
+  lastAdded = { barcode: it.barcode, name: it.generic_name, kind: it.kind,
+                scanId: it.id, orderId: rec.order_id };
   if (rec.warning) flash('AI mapping skipped: ' + rec.warning + '. Saved as raw name — edit under Lookup Tables.', 'warn');
 }
 

@@ -2,6 +2,8 @@
 // Record a single scan, look up a barcode, or remove a scan from the open order.
 // POST { action: 'lookup', barcode }                          -> resolve only, do not insert.
 // POST { action: 'record', barcode, weight_lbs?, quantity? }  -> resolve + insert; returns the new scan_id.
+//        copies (1-14, default 1) inserts that many identical rows at once -- the scan page's
+//        "Canned Beets, then 6" count; the reply's `items` lists every row it wrote.
 //        A store-printed item label (prefix 2) records as one package, like any other packaged item.
 // POST { action: 'delete', scan_id }                          -> remove a scan, only if it belongs to the current open order.
 // POST { action: 'search', q, scope? }                        -> partial name match against the lookup tables,
@@ -209,45 +211,76 @@ if ($res['kind'] === 'produce' && !empty($res['needs_weight'])) {
     $qty = isset($in['quantity']) ? max(1, (int)$in['quantity']) : 1;
 }
 
+// A count typed on the scan page after an item ("Canned Beets", then 6) sends
+// the rest of them here as `copies`. Each copy is its own row, identical to a
+// scan of this barcode, so the reports, the inventory deduction, the ✕ buttons
+// and the 990003 undo all treat them exactly as if the item had been scanned
+// that many times. A weighed item has no count to repeat: each one is weighed.
+$copies = isset($in['copies']) ? (int)$in['copies'] : 1;
+if ($copies < 1 || $copies > 14) jsonOut(['ok' => false, 'error' => 'copies must be 1 to 14'], 400);
+if ($copies > 1 && $weight !== null) {
+    jsonOut(['ok' => false, 'error' => $res['generic_name'] . ' is weighed — weigh each one instead of entering a count'], 400);
+}
+
 $station = currentStationId();
 $ins = $db->prepare(
     "INSERT INTO scans (order_id, barcode, generic_name, kind, quantity, weight_lbs, scanned_at, station)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 );
-$ins->execute([
-    $open['id'], $barcode, $res['generic_name'], $res['kind'],
-    $qty, $weight, now(), $station
-]);
-$scanId = (int)$db->lastInsertId();
+// One transaction, so a dropped connection leaves all of the copies or none --
+// the page can then say plainly whether to check the order, never "some of
+// them". The INSERT is the first statement, so BEGIN takes the write lock at
+// once (see endOrderById() in common.php).
+$scanIds = [];
+$db->beginTransaction();
+try {
+    $at = now();
+    for ($i = 0; $i < $copies; $i++) {
+        $ins->execute([
+            $open['id'], $barcode, $res['generic_name'], $res['kind'],
+            $qty, $weight, $at, $station
+        ]);
+        $scanIds[] = (int)$db->lastInsertId();
+    }
+    $db->commit();
+} catch (\Throwable $e) {
+    $db->rollBack();
+    throw $e;
+}
+$scanId = end($scanIds);
 
 // Echo the running totals back so the scanner UI can update its strip.
 $c = $db->prepare("SELECT COUNT(*) FROM scans WHERE order_id=?");
 $c->execute([$open['id']]);
 $scanCount = (int)$c->fetchColumn();
 
+$item = [
+    'id' => $scanId,
+    'generic_name' => $res['generic_name'],
+    'kind' => $res['kind'],
+    'quantity' => $qty,
+    'weight_lbs' => $weight,
+    'barcode' => $barcode,
+    // So the row renders with its station badge right away, without
+    // waiting for the next sync poll to redraw the table.
+    'station' => $station,
+    'station_label' => orderStations((int)$open['id'])[$station] ?? '',
+    'brand_name' => $res['brand_name'] ?? null,
+    'source' => $res['source'] ?? null,
+    // Present only for a store-printed label: the six-digit item key the
+    // name is cached under, so the station can say what it actually saved.
+    'store_key' => $res['store_key'] ?? null,
+    // True when this recorded under the placeholder name because Ignore
+    // Unknown Items is on, so the station can say so in the banner.
+    'unidentified' => !empty($res['unidentified']),
+];
+
 jsonOut([
     'ok' => true,
     'order_id' => (int)$open['id'],
     'scan_count' => $scanCount,
     'warning' => $res['ai_error'] ?? null,
-    'item' => [
-        'id' => $scanId,
-        'generic_name' => $res['generic_name'],
-        'kind' => $res['kind'],
-        'quantity' => $qty,
-        'weight_lbs' => $weight,
-        'barcode' => $barcode,
-        // So the row renders with its station badge right away, without
-        // waiting for the next sync poll to redraw the table.
-        'station' => $station,
-        'station_label' => orderStations((int)$open['id'])[$station] ?? '',
-        'brand_name' => $res['brand_name'] ?? null,
-        'source' => $res['source'] ?? null,
-        // Present only for a store-printed label: the six-digit item key the
-        // name is cached under, so the station can say what it actually saved.
-        'store_key' => $res['store_key'] ?? null,
-        // True when this recorded under the placeholder name because Ignore
-        // Unknown Items is on, so the station can say so in the banner.
-        'unidentified' => !empty($res['unidentified']),
-    ],
+    'item' => $item,
+    // Every row written, oldest first; one entry unless `copies` asked for more.
+    'items' => array_map(function ($id) use ($item) { return ['id' => $id] + $item; }, $scanIds),
 ]);
