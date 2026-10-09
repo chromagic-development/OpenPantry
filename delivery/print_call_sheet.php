@@ -61,7 +61,21 @@ $today = date('M j, Y');
     font: inherit; padding: 6px 12px; cursor: pointer;
     border: 1px solid #888; background: #fff; border-radius: 4px;
   }
-  .page { padding: 0.4in 0.5in; }
+  /* One sheet of Letter, portrait. The sheet is laid out at the printable
+     width (8.5in less the margins) on screen as well, so the preview looks
+     like the paper and fitSheet() measures exactly what will print. --z is
+     the zoom fitSheet() picks; the width grows by 1/zoom so a shrunken sheet
+     still spans the page, and the white "margin" drawn around it on screen
+     keeps its printed size. */
+  @page { size: letter portrait; margin: 0.4in; }
+  .page {
+    --z: 1; zoom: var(--z);
+    width: calc(7.7in / var(--z)); box-sizing: border-box;
+    margin: 0.6in auto; background: #fff; font-size: 9.5pt;
+    box-shadow: 0 0 0 calc(0.4in / var(--z)) #fff,
+                0 0 0 calc(0.4in / var(--z) + 1px) #bbb;
+  }
+  @media screen { body { background: #e6e6e6; } }
   .header-row { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 8px; }
   h1 { margin: 0; font-size: 16pt; }
   .subhead { font-size: 9.5pt; color: #555; margin-top: 2px; }
@@ -75,26 +89,29 @@ $today = date('M j, Y');
   table.sheet th {
     text-align: left; font-size: 8pt; text-transform: uppercase;
     color: #555; background: #f4f1e6;
-    border: 1px solid #888; padding: 5px 6px;
+    border: 1px solid #888; padding: 5px 4px;
   }
   table.sheet td {
-    border: 1px solid #aaa; padding: 5px 6px; vertical-align: top;
+    border: 1px solid #aaa; padding: 4px; vertical-align: top;
     page-break-inside: avoid;
   }
   /* Column sizing: keep Notes wide enough to actually write in, but not so
-     wide that Phone/Address get cramped. */
-  th.col-called,    td.col-called    { width: 50px; text-align: center; }
-  th.col-notes,     td.col-notes     { width: 18%; }
-  th.col-volunteer, td.col-volunteer { width: 90px; font-weight: 700; color: var(--brown, #6B4C11); }
-  th.col-client,    td.col-client    { width: 60px; font-family: 'Courier New', monospace; font-weight: 700; }
-  th.col-name,      td.col-name      { width: 12%; font-weight: 700; }
-  th.col-phone,     td.col-phone     { width: 100px; font-variant-numeric: tabular-nums; }
+     wide that Phone/Address get cramped. The short columns are sized to
+     their content (cell padding adds to these widths) so Address gets the
+     rest of the 7.7in sheet and doesn't wrap into tall rows. */
+  th.col-called,    td.col-called    { width: 38px; text-align: center; }
+  th.col-notes,     td.col-notes     { width: 15%; }
+  th.col-volunteer, td.col-volunteer { width: 76px; font-weight: 700; color: var(--brown, #6B4C11); }
+  th.col-client,    td.col-client    { width: 44px; font-family: 'Courier New', monospace; font-weight: 700; }
+  th.col-name,      td.col-name      { width: 14%; font-weight: 700; }
+  th.col-phone,     td.col-phone     { width: 88px; font-variant-numeric: tabular-nums; }
   th.col-addr,      td.col-addr      { width: auto; }
-  th.col-hh,        td.col-hh        { width: 60px; text-align: center; }
-  th.col-grp,       td.col-grp       { width: 50px; text-align: center; font-weight: 700; }
+  th.col-hh,        td.col-hh        { width: 34px; text-align: center; }
+  th.col-grp,       td.col-grp       { width: 34px; text-align: center; font-weight: 700; }
 
+  /* The tallest thing in a row, so it sets how many clients fit per sheet. */
   .cb-big {
-    display: inline-block; width: 22px; height: 22px;
+    display: inline-block; width: 16px; height: 16px;
     border: 2px solid #000; border-radius: 3px; background: #fff;
   }
   /* Notes cell: visible writing baseline so the volunteer has a clear
@@ -115,9 +132,7 @@ $today = date('M j, Y');
 
   @media print {
     .controls { display: none; }
-    body { font-size: 9pt; }
-    .page { padding: 0.3in 0.4in; }
-    @page { margin: 0.3in; }
+    .page { margin: 0; box-shadow: none; }
   }
 </style>
 </head>
@@ -189,6 +204,33 @@ $today = date('M j, Y');
     </div>
   <?php endif; ?>
 </div>
+
+<script>
+  // Zoom the sheet down just enough to fit one Letter page (10.2in tall inside
+  // the 0.4in margins, less a little for rounding). Zoom shrinks type, boxes and
+  // padding together. Below 60% the print gets too small to write on, so a very
+  // long list stops there and continues on a second sheet under a repeated header.
+  var SHEET_H = 10.15 * 96, MIN_Z = 0.6;
+  function fitSheet(p) {
+    function height(z) {
+      p.style.setProperty('--z', z);
+      return p.getBoundingClientRect().height;
+    }
+    if (height(1) <= SHEET_H) return;
+    // Binary-search the largest zoom that fits. A straight SHEET_H / height
+    // ratio isn't enough: Chrome rounds zoomed sizes up a little, so a sheet
+    // shrinks less than its zoom.
+    var lo = MIN_Z, hi = 1;
+    for (var i = 0; i < 8; i++) {
+      var mid = (lo + hi) / 2;
+      if (height(mid) <= SHEET_H) lo = mid; else hi = mid;
+    }
+    height(lo);
+  }
+  function fitSheets() { document.querySelectorAll('.page').forEach(fitSheet); }
+  fitSheets();
+  window.addEventListener('beforeprint', fitSheets);
+</script>
 
 </body>
 </html>

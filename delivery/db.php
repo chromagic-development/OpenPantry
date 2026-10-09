@@ -196,7 +196,7 @@ function buildDeliveryItems(PDO $foodscanDb, ?PDO $picklistDb): array {
     // only joins the menu when an inventory row carries its name, the
     // filter also cascades to the matching config row.
     $inventory = $foodscanDb->query(
-        "SELECT generic_name, count, unit FROM inventory
+        "SELECT generic_name, count, unit, lb_per_each FROM inventory
           WHERE count > 0 AND deliverable = 1"
     )->fetchAll();
     $invByLc = [];
@@ -269,6 +269,7 @@ function buildDeliveryItems(PDO $foodscanDb, ?PDO $picklistDb): array {
                     'use_children'  => (int)$cfg['use_children'],
                     'family_factor' => (float)$cfg['family_factor'],
                     'unit'          => $inv['unit'],
+                    'lb_per_each'   => (float)$inv['lb_per_each'],
                     'has_detail'    => false,
                     'detail_label'  => 'Size',
                     'sizes'         => [],
@@ -289,6 +290,7 @@ function buildDeliveryItems(PDO $foodscanDb, ?PDO $picklistDb): array {
             'category'     => $category,
             'has_factor'   => false,
             'unit'         => $inv['unit'],
+            'lb_per_each'  => (float)$inv['lb_per_each'],
             'has_detail'   => false,
             'detail_label' => 'Size',
             'sizes'        => [],
@@ -351,6 +353,22 @@ function deliveryItemQuantity(array $item, int $adults, int $children, float $fa
         return ['by_weight' => false, 'quantity' => 1, 'decrement' => false];
     }
     return ['by_weight' => false, 'quantity' => 1, 'decrement' => true];
+}
+
+// The Weight both printed sheets show for a by-weight line — the Delivery
+// Order Form (print_menus.php) and the Packing & Delivery List
+// (print_packing_lists.php) — so the two always agree. When the lb item has an
+// Avg Wt (lb ea) on the Inventory page, the piece count that weight works out
+// to follows it, "3 lb or 9 each", so the packer can fill the line either way.
+// $eachFirst swaps the two, "9 each or 3 lb"; the packing list leads with the
+// count.
+// The count is rounded to the nearest whole piece and never drops below one.
+// With no Avg Wt there is nothing to convert by, and the weight stands alone.
+function deliveryWeightLabel(float $lbs, float $lbPerEach = 0.0, bool $eachFirst = false): string {
+    $weight = rtrim(rtrim(number_format($lbs, 2, '.', ''), '0'), '.') . ' lb';
+    if ($lbPerEach <= 0) return $weight;
+    $each = max(1, (int)round($lbs / $lbPerEach)) . ' each';
+    return $eachFirst ? $each . ' or ' . $weight : $weight . ' or ' . $each;
 }
 
 // Shared writer for delivery orders. Used by the kiosk (submit_delivery.php)

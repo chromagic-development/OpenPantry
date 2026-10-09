@@ -250,8 +250,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           . "  - status is \"unsure\" ONLY if the mark is genuinely ambiguous (e.g. a stray\n"
           . "    pen line that may or may not land inside the box).\n"
           . "  - On the form, each item name is followed by a parenthesized Qty/Weight,\n"
-          . "    e.g. \"(2 each)\" or \"(1.5 lb)\", possibly hand-corrected. That suffix is\n"
-          . "    NOT part of the item name — ignore it and use the strings above verbatim.\n"
+          . "    e.g. \"(2 each)\", \"(1.5 lb)\" or \"(3 lb or 9 each)\", possibly\n"
+          . "    hand-corrected. That suffix is NOT part of the item name — ignore it and\n"
+          . "    use the strings above verbatim.\n"
           . "  - Do not invent items, rename items, or skip items.";
 
         // Pass B: category-by-category with an explicit per-category item
@@ -287,8 +288,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           . "  - status is \"unchecked\" only when the box is clearly empty.\n"
           . "  - status is \"unsure\" when the mark is genuinely ambiguous.\n"
           . "  - Each printed item name ends with a parenthesized Qty/Weight, e.g.\n"
-          . "    \"(2 each)\" or \"(1.5 lb)\", possibly hand-corrected. Ignore that suffix —\n"
-          . "    it is not part of the item name.\n"
+          . "    \"(2 each)\", \"(1.5 lb)\" or \"(3 lb or 9 each)\", possibly hand-corrected.\n"
+          . "    Ignore that suffix — it is not part of the item name.\n"
           . "  - Use the form_name strings verbatim. Do not invent or rename.";
 
         $passConfigs = [

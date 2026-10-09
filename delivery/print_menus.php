@@ -80,7 +80,8 @@ foreach ($catOrder as $cat) {
 // after the item name. Mirrors the household clamps + familySize formula in
 // persistDeliveryOrder() and the Qty / Weight formatting in
 // print_packing_lists.php (fmtAmount), so the order form and the packing
-// list always show the same numbers.
+// list always show the same numbers — weights go through the same
+// deliveryWeightLabel(), which adds the "or N each" for items with an Avg Wt.
 function fmtPlannedAmount(array $item, int $adults, int $children): string {
     $adults   = max(1, $adults);
     $children = max(0, $children);
@@ -88,8 +89,7 @@ function fmtPlannedAmount(array $item, int $adults, int $children): string {
     if ($familySize < 1) $familySize = 1;
     $qd = deliveryItemQuantity($item, $adults, $children, $familySize);
     if (!empty($qd['by_weight'])) {
-        $w = rtrim(rtrim(number_format((float)$qd['weight_lbs'], 2, '.', ''), '0'), '.');
-        return $w . ' lb';
+        return deliveryWeightLabel((float)$qd['weight_lbs'], (float)($item['lb_per_each'] ?? 0));
     }
     return (int)$qd['quantity'] . ' each';
 }
@@ -112,8 +112,23 @@ $today = date('M j, Y');
     font: inherit; padding: 6px 12px; cursor: pointer;
     border: 1px solid #888; background: #fff; border-radius: 4px;
   }
-  .page { padding: 0.5in; page-break-after: always; }
-  .page:last-child { page-break-after: auto; }
+  /* Each menu is one sheet of Letter, portrait. The sheet is laid out at the
+     printable width (8.5in less the margins) on screen as well, so the preview
+     looks like the paper and fitSheet() measures exactly what will print. --z
+     is the zoom fitSheet() picks; the width grows by 1/zoom so a shrunken
+     sheet still spans the page, and the white "margin" drawn around it on
+     screen keeps its printed size. Breaks go before each sheet after the
+     first, so the script after the last one can't leave a trailing blank. */
+  @page { size: letter portrait; margin: 0.5in; }
+  .page {
+    --z: 1; zoom: var(--z);
+    width: calc(7.5in / var(--z)); box-sizing: border-box;
+    margin: 0.7in auto; background: #fff;
+    box-shadow: 0 0 0 calc(0.5in / var(--z)) #fff,
+                0 0 0 calc(0.5in / var(--z) + 1px) #bbb;
+  }
+  .page + .page { break-before: page; page-break-before: always; }
+  @media screen { body { background: #e6e6e6; } }
   .id-badge {
     float: right; border: 2px solid #000; padding: 6px 12px;
     font-size: 14pt; font-weight: 800; font-family: 'Courier New', monospace;
@@ -150,6 +165,7 @@ $today = date('M j, Y');
   .empty { padding: 30px; text-align: center; color: #555; font-style: italic; }
   @media print {
     .controls { display: none; }
+    .page { margin: 0; box-shadow: none; }
   }
 </style>
 </head>
@@ -230,6 +246,33 @@ $today = date('M j, Y');
     </div>
   <?php endforeach; ?>
 <?php endif; ?>
+
+<script>
+  // Zoom each menu down just enough to fit one Letter page (10in tall inside
+  // the 0.5in margins, less a little for rounding). Zoom shrinks type, boxes and
+  // padding together. Below 60% the boxes get too small to mark and for the AI
+  // upload to read, so a very long menu stops there and continues on a second sheet.
+  var SHEET_H = 9.95 * 96, MIN_Z = 0.6;
+  function fitSheet(p) {
+    function height(z) {
+      p.style.setProperty('--z', z);
+      return p.getBoundingClientRect().height;
+    }
+    if (height(1) <= SHEET_H) return;
+    // Binary-search the largest zoom that fits. A straight SHEET_H / height
+    // ratio isn't enough: Chrome rounds zoomed sizes up a little, so a sheet
+    // shrinks less than its zoom.
+    var lo = MIN_Z, hi = 1;
+    for (var i = 0; i < 8; i++) {
+      var mid = (lo + hi) / 2;
+      if (height(mid) <= SHEET_H) lo = mid; else hi = mid;
+    }
+    height(lo);
+  }
+  function fitSheets() { document.querySelectorAll('.page').forEach(fitSheet); }
+  fitSheets();
+  window.addEventListener('beforeprint', fitSheets);
+</script>
 
 </body>
 </html>
