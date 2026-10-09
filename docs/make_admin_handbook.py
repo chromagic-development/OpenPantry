@@ -59,7 +59,7 @@ E.append(Spacer(1, 0.55 * inch))
 E.append(Paragraph("Setup, configuration, security, reporting, and day-to-day "
                    "operation of OpenPantry.", cover_center))
 E.append(Spacer(1, 0.35 * inch))
-E.append(Paragraph("Revised September 2026 &nbsp;•&nbsp; Version 1.2", cover_center))
+E.append(Paragraph("Revised October 2026 &nbsp;•&nbsp; Version 1.3", cover_center))
 E.append(Paragraph("© 2026 Chromagic Development • Bruce Alexander "
                    "• MIT License", cover_center))
 E.append(PageBreak())
@@ -125,7 +125,11 @@ E.append(bullet("<b>Supervisor password</b> (optional) — a second login for "
                 "default supervisor password."))
 E.append(bullet("<b>OpenAI API key</b> — powers automatic "
                 "brand→generic naming on new barcodes. Use the <b>test</b> "
-                "button to confirm it works. Stored encrypted at rest."))
+                "button to confirm it works. Stored encrypted at rest. The "
+                "<b>Model</b> field takes any OpenAI chat model; newer reasoning "
+                "models (gpt-5 and later, the o-series) work too, because "
+                "OpenPantry adjusts its request to the model family and turns "
+                "reasoning off or down so first-time scans stay fast."))
 E.append(bullet("<b>Secure Network Access</b> — set the <b>Public IPv4 "
                 "Address</b> to your pantry's public Wi-Fi address so the kiosks "
                 "only work on-site. Up to <b>two additional addresses</b> can "
@@ -201,7 +205,10 @@ E.append(bullet("<b>Network + hours gate</b> (in " + code("auth.php") + ") "
                 "outside allowed hours, with a styled “Access Denied” "
                 "wall. A scanning station that is already open when the gate "
                 "starts refusing it gets a <b>The server refused this "
-                "station</b> window instead, naming which gate it hit."))
+                "station</b> window instead, naming which gate it hit. The gate "
+                "covers the requests behind each page as well as the page "
+                "itself — the order form's submit, the pick queue's ticks and "
+                "cancels — so knowing a URL is no way around it."))
 E.append(bullet("<b>Encryption at rest</b> (libsodium) now covers <b>every "
                 "Settings value</b> — the OpenAI key, allowed IP, SMTP "
                 "credentials, and the rest (only the already-hashed admin "
@@ -262,7 +269,9 @@ E.append(bullet("<b>Order unit &amp; Avg Wt</b> — for produce the pantry weigh
                 "and email are written in it, and Restock Now converts the "
                 "delivery back to pounds. Leave Order Unit on “same as stock” "
                 "for everything else. Without an Avg Wt there is nothing to "
-                "convert by, so the order falls back to the stock unit."))
+                "convert by, so the order falls back to the stock unit. An Avg "
+                "Wt also adds a piece count to by-weight lines on the delivery "
+                "sheets (see Home deliveries)."))
 E.append(bullet("<b>Checkout, deliveries, events, OrderAhead</b> all decrement "
                 "inventory automatically as orders close or imports run. "
                 "Closing an order is all-or-nothing: every item comes out of "
@@ -378,12 +387,41 @@ E.append(bullet("<b>Order Now</b> — the reorder report. Computes a Par "
                 "reminder rows that have an order request, so <b>Generate "
                 "Email</b> and <b>Restock Now</b> act on what the page is "
                 "asking you to order. Tick or untick rows to change that."))
+# order_report.php's Days Not Scanned card + api_unscanned.php.
+E.append(bullet("<b>Days Not Scanned</b> — a panel at the foot of Order Now "
+                "for days the pantry was open but nothing was scanned "
+                "(volunteer absent, station down). Food still went out, so the "
+                "demand model treats those days as <b>unobserved</b> rather "
+                "than as zero demand, which would drag the averages down and "
+                "hide reorder alerts. Enter a <b>Start</b> and <b>End</b> date "
+                "to record a whole stretch at once (up to a year); both default "
+                "to today, so a single missed day is one click. The list pages "
+                "newest first, 30 days at a time. Don't list days the pantry "
+                "was actually closed: nothing moving on a holiday is honest "
+                "demand data."))
 E.append(bullet("<b>Orders Listing</b> — every order and its items over a "
                 "date range (delivery/event orders are tagged)."))
 E.append(bullet("<b>Item Usage</b> — per-item totals over a date range."))
 E.append(bullet("<b>Daily Volume</b> — orders and scans per day."))
 E.append(bullet("<b>Basket Size</b> — distribution of items per in-pantry "
                 "trip over time."))
+# traffic_report.php: TR_HOURS, TR_MIN_DAY_ORDERS, UTC → Eastern bucketing.
+E.append(bullet("<b>Client Traffic</b> — when clients arrive, for planning "
+                "volunteer shifts. One bar per half hour of the posted hours "
+                "of operation, grouped by weekday; each bar is the average "
+                "number of Menu Counter orders (from " + code("picklist.db") +
+                ") in that half hour on a typical open day. Hover a bar for "
+                "the total and how many days were averaged. Orders placed "
+                "outside the posted hours, such as stragglers just after "
+                "closing, are counted in a tile but not charted. It defaults "
+                "to the last 90 days."))
+E.append(info("UPDATE CLIENT TRAFFIC WHEN THE HOURS CHANGE",
+    "The report doesn't guess the pantry's schedule: the hours are listed in "
+    + code("TR_HOURS") + " at the top of " +
+    code("reports/traffic_report/traffic_report.php") + ", one line per "
+    "weekday, with one [opens, closes] pair per session, on the half hour. "
+    "When the posted hours change, edit that list and upload the file, or "
+    "the chart keeps showing the old schedule."))
 # The odd one out, and worth saying so: every other report answers an
 # operational question, this one answers a funder's.
 E.append(bullet("<b>Impact</b> — the report you hand a board member or a "
@@ -471,6 +509,19 @@ E.append(bullet("<b>Item admin</b> — add, remove, reorder (drag &amp; "
                 "<b>Family Factor</b> (multiplied by household size, capped at "
                 "5, rounded up) that decides how many units land in the pick "
                 "queue."))
+# admin.php's Save modal + save_config's server-side check in menucounter/api.php.
+E.append(bullet("<b>Saving item changes</b> — edits stay on the page until "
+                "<b>Save All Changes</b>, which asks for the administrator or "
+                "supervisor password <b>once</b> when the save adds, removes, or "
+                "edits an item's name, category, subtype, Family Factor, or "
+                "Adults/Children setting, and says how many items each way. "
+                "The <b>On</b> and <b>Unavailable</b> toggles and drag "
+                "reordering save without it, so they can be flipped mid-shift. "
+                "The server makes the same check itself against the items it "
+                "holds, so if someone else added an item after your page "
+                "loaded, a save that would delete it asks for the password "
+                "too. Wrong passwords count toward the same lockout as the "
+                "login screen."))
 E.append(bullet("<b>Pick queue (Orders)</b> — the live back-of-house "
                 "dashboard volunteers pull from; auto-refreshes every 5 "
                 "seconds, and stops the pickers with a connection-lost window "
@@ -501,6 +552,14 @@ E.append(bullet("<b>Packing &amp; Delivery Lists</b> — per-client pick "
                 "sheets for orders recorded this round. Count items show as "
                 "<b>2 each</b>; produce delivered by weight shows as "
                 "<b>1.5 lb</b>."))
+# delivery/db.php deliveryWeightLabel(); the packing list passes $eachFirst.
+E.append(bullet("<b>Pieces for by-weight produce</b> — when the item has an "
+                "<b>Avg Wt</b> on the Inventory page, both sheets add the piece "
+                "count that weight works out to, rounded to the nearest whole "
+                "piece. The order form reads <b>(3 lb or 9 each)</b>; the "
+                "packing list leads with the count, <b>9 each or 3 lb</b>, since "
+                "packers fill the bag by counting. With no Avg Wt the weight "
+                "stands alone."))
 E.append(bullet("<b>AI upload</b> — completed forms are scanned to one "
                 "PDF and read by vision AI in two independent passes; "
                 "disagreements are flagged “verify against the "

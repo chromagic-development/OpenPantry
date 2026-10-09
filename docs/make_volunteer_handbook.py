@@ -33,7 +33,7 @@ E += cover(
     subtitle="Volunteer Handbook",
     badge_text="FOR VOLUNTEERS",
     blurb="How to open and run the checkout and Menu Counter stations.",
-    revision="Revised September 2026 &nbsp;•&nbsp; Version 1.3")
+    revision="Revised October 2026 &nbsp;•&nbsp; Version 1.4")
 
 # ================================================================ welcome
 E.append(kicker("START HERE"))
@@ -141,9 +141,8 @@ E.append(body(
     "record, exactly as if you'd scanned it — the best match, at the top, "
     "until you press the <b>up/down arrow keys</b> to move the large print to "
     "another item. You can also keep typing to narrow the list, or just tap "
-    "an item. Digits on their own are still "
-    "treated as a barcode, so typing a name never interferes with the "
-    "scanner."))
+    "an item. Typing a name never interferes with the scanner."))
+
 E.append(good("FASTEST FIX FOR A TORN OR MISSING BARCODE",
     "If a label is smudged or peeled off, don't hunt for the number — just "
     "type the first few letters of the item's name and pick it from the "
@@ -330,6 +329,19 @@ E.append(warn("KEEP THE CURSOR IN THE BOX",
     "The scanner types like a keyboard, so the barcode box must stay selected "
     "(it glows green). If scans stop registering, tap once inside that box and "
     "try again."))
+# scan.php handleCount(): a number from 1 to 15 typed right after an item
+# means "this many in all", so n-1 more identical rows are recorded.
+E.append(Paragraph("Several of the same item", S["h3"]))
+E.append(body(
+    "A shopper taking six cans of the same beets? Scan (or add by name) "
+    "<b>one</b> of them, then type how many there are <b>in all</b> — a "
+    "number from <b>1 to 15</b> — and press <b>Enter</b>. The rest are added "
+    "for you: scan one can of beets, type <b>6</b>, and the order shows six "
+    "cans. The number counts the one you already scanned, so don't add one "
+    "for it. It applies once, to the item you added last; for another batch, "
+    "scan the next item first. Produce that is weighed can't be counted this "
+    "way — weigh each one. Typed the wrong number? Tap the red <b>×</b> on any "
+    "extra lines."))
 E.append(PageBreak())
 
 # ================================================================ recalls
@@ -520,6 +532,13 @@ E.append(bullet("A translate button lets shoppers switch languages; the form "
                 "fresh."))
 E.append(bullet("When they submit, a confirmation appears and the order drops "
                 "into the pick queue in back."))
+# submit_order.php applies index.php's network + hours wall, so a form sent
+# after closing (or off the pantry Wi-Fi) lands on Access Denied, unrecorded.
+E.append(bullet("If <b>Access Denied</b> or “Access is closed right now” "
+                "appears <i>after</i> they press submit, the order was <b>not</b> "
+                "recorded — usually because pantry hours ended while they were "
+                "filling it in. Note what they asked for and let the volunteer "
+                "in back know, rather than having them start over."))
 
 E.append(Paragraph("Picking an order in back", S["h3"]))
 E.append(step(1, "New orders appear in the queue sidebar with a progress bar. "
@@ -541,7 +560,10 @@ E.append(info("IF THE PICK QUEUE LOSES ITS CONNECTION",
     "does. If it can't reach the server, the dot beside Refresh turns red, a "
     "<b>Connection problem — stop picking</b> window covers the screen with "
     "three falling notes, and it says whether it's the internet or the server. "
-    "Stop ticking items — a tick made now would look saved and not be. When "
+    "Stop ticking items — a tick made now would look saved and not be. If the "
+    "server is up but refusing this computer (the pantry's network address "
+    "changed, or it's outside pantry hours), the window says <b>The server "
+    "refused this computer</b> instead. When "
     "the connection returns the window lifts with three rising notes and the "
     "picklist <b>reloads from the server</b>, so every check mark shows what "
     "was really saved. The green notice lists any tick, <b>+</b>, <b>×</b>, or "
@@ -559,6 +581,11 @@ E.append(body(
     "counts, then submit. A volunteer lead will show you the delivery rotation "
     "and printing steps — and remember that client names, addresses, and phone "
     "numbers are private (see below)."))
+# print_packing_lists.php: deliveryWeightLabel(..., $eachFirst = true).
+E.append(bullet("On a <b>Packing &amp; Delivery List</b>, produce can read "
+                "<b>9 each or 3 lb</b>: pack either nine pieces or three pounds, "
+                "whichever is easier. A line with only a weight, such as "
+                "<b>1.5 lb</b>, goes on the scale."))
 
 E.append(kicker("EVERY SHIFT"))
 E += h1("Privacy &amp; closing up")
