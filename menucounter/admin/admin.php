@@ -353,7 +353,7 @@ if (!isAuthenticated()) {
           <span style="font-size:.78rem;color:#999;">read-only</span>
         <?php endif; ?>
       </div>
-      <span style="font-size:.78rem;color:#999;">Changes are saved to the database immediately</span>
+      <span style="font-size:.78rem;color:#999;">Changes are saved to the database when you click Save All Changes</span>
     </div>
   </div>
 </div>
@@ -380,6 +380,7 @@ if (!isAuthenticated()) {
 <script>
 const CATS = ['DAIRY','DRY GOODS','FROZEN ITEMS','SPECIALS','PRODUCE','OTHER ITEMS'];
 let items = [];
+let savedItems = [];  // the items as last loaded from the server
 let dragSrc = null;
 
 // ── Password modal ──────────────────────────────────────────────────
@@ -443,6 +444,7 @@ async function loadItems() {
   const res  = await fetch('../api.php?action=get_config');
   const data = await res.json();
   items = data.items || [];
+  savedItems = items.map(o => Object.assign({}, o));
   document.getElementById('clientNotes').value = data.client_notes || '';
   renderTable();
 }
@@ -482,43 +484,40 @@ function renderTable() {
       </td>
       <td>
         <select data-row="${i}" data-field="category"
-                onchange="confirmFieldChange(this, ${i}, 'category')"
-                onfocus="this.dataset.prev=this.value">
+                onchange="setField(this, ${i}, 'category')">
           ${CATS.map(c => `<option value="${c}" ${c===item.category?'selected':''}>${c}</option>`).join('')}
         </select>
       </td>
       <td><input type="text" value="${escHtml(item.item_name)}"
-                 onfocus="this.dataset.prev=this.value"
-                 onchange="confirmFieldChange(this, ${i}, 'item_name')"
+                 onchange="setField(this, ${i}, 'item_name')"
                  placeholder="Item name"></td>
       <td style="text-align:center;">
         <input type="checkbox" ${item.has_detail==1?'checked':''}
-               onchange="confirmCheckboxChange(this, ${i}, 'has_detail')">
+               onchange="setCheckbox(this, ${i}, 'has_detail')">
       </td>
       <td>
-        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.detail_label||'Size')}" onfocus="this.dataset.prev=this.value" onchange="confirmFieldChange(this, ${i}, 'detail_label')" placeholder="Label">` : '<span style="color:#ccc">—</span>'}
+        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.detail_label||'Size')}" onchange="setField(this, ${i}, 'detail_label')" placeholder="Label">` : '<span style="color:#ccc">—</span>'}
       </td>
       <td>
-        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.size_options||'')}" onfocus="this.dataset.prev=this.value" onchange="confirmFieldChange(this, ${i}, 'size_options')" placeholder="e.g. Small,Medium,Large" title="Comma-separated list of size options">` : '<span style="color:#ccc">—</span>'}
+        ${item.has_detail==1 ? `<input type="text" value="${escHtml(item.size_options||'')}" onchange="setField(this, ${i}, 'size_options')" placeholder="e.g. Small,Medium,Large" title="Comma-separated list of size options">` : '<span style="color:#ccc">—</span>'}
       </td>
       <td>
         <input type="number" value="${parseFloat(item.family_factor||1).toFixed(2)}"
                min="0.01" step="0.01"
                title="Multiply family size (max 5) by this factor then round up to get item quantity"
-               onfocus="this.dataset.prev=this.value"
-               onchange="confirmFieldChange(this, ${i}, 'family_factor')"
+               onchange="setField(this, ${i}, 'family_factor')"
                style="width:70px;text-align:center;">
       </td>
       <td style="text-align:center;">
         <input type="checkbox" title="Use only Adults count in calculation"
                ${item.use_adults==1?'checked':''}
-               onchange="confirmCheckboxChange(this, ${i}, 'use_adults')"
+               onchange="setCheckbox(this, ${i}, 'use_adults')"
                style="accent-color:#6B4C11;width:16px;height:16px;">
       </td>
       <td style="text-align:center;">
         <input type="checkbox" title="Use only Children count in calculation"
                ${item.use_children==1?'checked':''}
-               onchange="confirmCheckboxChange(this, ${i}, 'use_children')"
+               onchange="setCheckbox(this, ${i}, 'use_children')"
                style="accent-color:#4A90D9;width:16px;height:16px;">
       </td>
       <td>
@@ -544,92 +543,36 @@ function filterItems(term) {
   });
 }
 
+// Edits, additions and removals only change the table in the page. Nothing
+// reaches the database until Save All Changes, which is where the password is
+// asked for, once, covering everything pending (see saveItems).
 function addRow() {
-  requirePassword(
-    'Confirm Change',
-    'Enter the admin password to add a new item.',
-    function() {
-      items.push({ category:'DAIRY', item_name:'', has_detail:0, detail_label:'', size_options:'', family_factor:0.10, active:1, unavailable:0, use_adults:0, use_children:0, sort_order:items.length, isNew:true });
-      renderTable();
-      // Focus the new row name input
-      setTimeout(() => {
-        const rows = document.querySelectorAll('#itemsTbody tr');
-        const last = rows[rows.length-1];
-        if (last) { const inp = last.querySelector('input[type="text"]'); if (inp) inp.focus(); }
-      }, 50);
-    }
-  );
+  items.push({ category:'DAIRY', item_name:'', has_detail:0, detail_label:'', size_options:'', family_factor:0.10, active:1, unavailable:0, use_adults:0, use_children:0, sort_order:items.length, isNew:true });
+  renderTable();
+  // Focus the new row name input
+  setTimeout(() => {
+    const rows = document.querySelectorAll('#itemsTbody tr');
+    const last = rows[rows.length-1];
+    if (last) { const inp = last.querySelector('input[type="text"]'); if (inp) inp.focus(); }
+  }, 50);
 }
 
-var FIELD_LABELS = {
-  category:      'Category',
-  item_name:     'Item Name',
-  detail_label:  'Subtype Label',
-  size_options:  'Subtype Selections',
-  family_factor: 'Family Factor',
-  has_detail:    'Subtype?',
-  use_adults:    'Adults',
-  use_children:  'Children'
-};
-
-function applyFieldValue(i, field, newVal) {
-  items[i][field] = field === 'family_factor' ? (parseFloat(newVal) || 1) : newVal;
+function setField(el, i, field) {
+  items[i][field] = field === 'family_factor' ? (parseFloat(el.value) || 1) : el.value;
 }
 
-function confirmFieldChange(el, i, field) {
-  var newVal  = el.value;
-  var prevVal = el.dataset.prev !== undefined ? el.dataset.prev : el.defaultValue;
-  if (newVal === prevVal) return;
-
-  // New rows (not yet saved) don't require password approval
-  if (items[i] && items[i].isNew) {
-    applyFieldValue(i, field, newVal);
-    el.dataset.prev = newVal;
-    return;
-  }
-
-  requirePassword(
-    'Confirm Change',
-    'Enter the admin password to change the ' + FIELD_LABELS[field] + ' field.',
-    function() {
-      applyFieldValue(i, field, newVal);
-      el.dataset.prev = newVal;
-    },
-    function() {
-      el.value = prevVal;
-    }
-  );
+function setCheckbox(el, i, field) {
+  items[i][field] = el.checked ? 1 : 0;
+  // Subtype? shows/hides the label and selections inputs, so re-render
+  if (field === 'has_detail') renderTable();
 }
 
-function confirmCheckboxChange(el, i, field) {
-  var newVal = el.checked ? 1 : 0;
-
-  function apply() {
-    items[i][field] = newVal;
-    // Subtype? shows/hides the label and selections inputs, so re-render
-    if (field === 'has_detail') renderTable();
-  }
-
-  // New rows (not yet saved) don't require password approval
-  if (items[i] && items[i].isNew) { apply(); return; }
-
-  requirePassword(
-    'Confirm Change',
-    'Enter the admin password to change the ' + FIELD_LABELS[field] + ' field.',
-    apply,
-    function() { el.checked = (newVal !== 1); }
-  );
-}
-
+// A ✕ sits on every row and takes the row out of view at once, so a stray
+// click gets a plain confirmation. The password still waits for Save.
 function removeRow(i) {
-  requirePassword(
-    'Confirm Remove',
-    'Enter the admin password to remove "' + (items[i].item_name || 'this item') + '".',
-    function() {
-      items.splice(i, 1);
-      renderTable();
-    }
-  );
+  if (!confirm('Remove "' + (items[i].item_name || 'this item') + '"? It is deleted when you click Save All Changes.')) return;
+  items.splice(i, 1);
+  renderTable();
 }
 
 function toggleActive(i) {
@@ -649,7 +592,36 @@ function dragDrop(e, i)  {
 }
 function dragEnd(e) { e.currentTarget.classList.remove('row-dragging'); dragSrc = null; }
 
-async function saveItems() {
+// The fields that have always needed the admin password to change. The On and
+// Unavailable toggles and drag reordering never did, so a save carrying only
+// those goes straight through without asking.
+const GUARDED_FIELDS = ['category','item_name','has_detail','detail_label','size_options','family_factor','use_adults','use_children'];
+
+function sameValue(field, a, b) {
+  if (field === 'family_factor') return parseFloat(a) === parseFloat(b);
+  if (field === 'has_detail' || field === 'use_adults' || field === 'use_children') return Number(a||0) === Number(b||0);
+  return String(a == null ? '' : a) === String(b == null ? '' : b);
+}
+
+// What Save All Changes would write that needs the password, measured against
+// the items as the server last returned them. Changing a field and changing it
+// back counts as no change.
+function guardedChanges() {
+  const before = {};
+  savedItems.forEach(o => { before[o.id] = o; });
+  const kept = {};
+  let added = 0, edited = 0;
+  items.forEach(o => {
+    const old = o.id != null ? before[o.id] : undefined;
+    if (!old) { added++; return; }
+    kept[o.id] = true;
+    if (GUARDED_FIELDS.some(f => !sameValue(f, o[f], old[f]))) edited++;
+  });
+  const removed = savedItems.filter(o => !kept[o.id]).length;
+  return { added, edited, removed };
+}
+
+function saveItems() {
   // Validate
   for (let i=0; i<items.length; i++) {
     if (!items[i].item_name.trim()) {
@@ -657,6 +629,23 @@ async function saveItems() {
       return;
     }
   }
+  const c = guardedChanges();
+  const n = (k, word) => k + ' item' + (k === 1 ? '' : 's') + ' ' + word;
+  const parts = [];
+  if (c.edited)  parts.push(n(c.edited, 'edited'));
+  if (c.added)   parts.push(n(c.added, 'added'));
+  if (c.removed) parts.push(n(c.removed, 'removed'));
+  if (!parts.length) { writeItems(); return; }
+  // Cancel just closes the modal: the edits stay in the table, unsaved, so
+  // Save can be tried again.
+  requirePassword(
+    'Save Changes',
+    'Enter the admin password to save ' + parts.join(', ') + '.',
+    writeItems
+  );
+}
+
+async function writeItems() {
   try {
     const res  = await fetch('../api.php?action=save_config', {
       method: 'POST',
