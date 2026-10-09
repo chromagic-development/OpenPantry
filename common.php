@@ -198,6 +198,7 @@ function renderNav(string $active = ''): void {
             ['key' => 'usage',   'label' => 'Item Usage',     'href' => $p . 'reports/usage_report/'],
             ['key' => 'volume',  'label' => 'Daily Volume',   'href' => $p . 'reports/volume_report/'],
             ['key' => 'basket',  'label' => 'Basket Size',    'href' => $p . 'reports/basket_report/'],
+            ['key' => 'traffic', 'label' => 'Client Traffic', 'href' => $p . 'reports/traffic_report/'],
             ['key' => 'impact',  'label' => 'Impact',         'href' => $p . 'reports/impact_report/'],
         ]],
         ['type' => 'link', 'key' => 'settings', 'label' => 'Settings', 'href' => $p . 'settings/'],

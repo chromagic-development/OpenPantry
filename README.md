@@ -139,6 +139,14 @@ All of these draw from the same inventory pool:
 - **Daily Volume** — orders and scans per day.
 - **Basket Size** — distribution of items-per-order for in-pantry trips
   (evidence on whether unrationed access leads to larger baskets over time).
+- **Client Traffic** — average client orders (from `picklist.db`) per half
+  hour of operation, for each weekday, as one histogram. `created_at` is UTC,
+  so it is converted to Eastern before bucketing. The chart covers exactly the
+  posted hours of operation, set in `TR_HOURS` at the top of
+  `reports/traffic_report/traffic_report.php` (edit it when the schedule
+  changes). Averages are over operating days — scheduled days with 5+ orders
+  during posted hours; orders outside the hours are counted on the page but
+  not charted. Defaults to the trailing 90 days.
 - **Impact** — the funder/board view, and the only report that reads *both*
   databases. Pounds distributed and meals provided, households and people
   reached, service channels, top items, donated-vs-purchased sourcing, and
