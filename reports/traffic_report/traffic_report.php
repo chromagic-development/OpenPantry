@@ -49,18 +49,40 @@ function trOpenSlots(int $dow): array {
     return $slots;
 }
 
-// Query-string dates feed strtotime()/DateTime, so reject anything that isn't
-// a real Y-m-d before it gets that far.
+// Start Date is sticky, the same way as the Volume and Impact reports: the
+// last one the report was run with is kept in a cookie and becomes the default
+// next visit. Only an explicit submission writes it, and Reset clears it.
+define('TR_START_COOKIE', 'fp_traffic_start');
+
+// Query-string and cookie dates feed strtotime()/DateTime, so reject anything
+// that isn't a real Y-m-d before it gets that far.
 function trValidDate($v): bool {
     if (!is_string($v) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $v)) return false;
     $d = DateTime::createFromFormat('Y-m-d', $v);
     return $d !== false && $d->format('Y-m-d') === $v;
 }
 
-// Default to the trailing 90 days: about 13 of each weekday, enough for steady
-// averages while still reflecting the current schedule.
-$dateStart = isset($_GET['date_start']) && trValidDate($_GET['date_start'])
-    ? $_GET['date_start'] : date('Y-m-d', strtotime('-90 days'));
+// Must run before any output — this both clears a cookie and redirects.
+if (isset($_GET['reset'])) {
+    @setcookie(TR_START_COOKIE, '', time() - 3600, '/');
+    header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
+    exit;
+}
+
+// With nothing saved, default to the trailing 90 days: about 13 of each
+// weekday, enough for steady averages while still reflecting the current
+// schedule.
+$savedStart   = $_COOKIE[TR_START_COOKIE] ?? '';
+$defaultStart = trValidDate($savedStart) ? $savedStart : date('Y-m-d', strtotime('-90 days'));
+
+$userStart = isset($_GET['date_start']) && trValidDate($_GET['date_start'])
+    ? $_GET['date_start'] : null;
+if ($userStart !== null) {
+    @setcookie(TR_START_COOKIE, $userStart, time() + 365 * 24 * 3600, '/');
+    $_COOKIE[TR_START_COOKIE] = $userStart;
+}
+
+$dateStart = $userStart ?? $defaultStart;
 $dateEnd   = isset($_GET['date_end']) && trValidDate($_GET['date_end'])
     ? $_GET['date_end'] : date('Y-m-d');
 
@@ -233,7 +255,7 @@ renderNav('traffic');
       </div>
       <div class="row" style="margin-top:14px;">
         <button type="submit" class="btn btn-primary" style="flex:0 0 160px;">📅 Run Report</button>
-        <a href="?" class="btn btn-secondary" style="flex:0 0 100px; text-align:center; text-decoration:none;">↺ Reset</a>
+        <a href="?reset=1" class="btn btn-secondary" style="flex:0 0 100px; text-align:center; text-decoration:none;">↺ Reset</a>
         <?php if ($hasData): ?>
           <button type="button" class="btn btn-secondary" style="flex:0 0 100px;" onclick="window.print()">🖨 Print</button>
         <?php endif; ?>
