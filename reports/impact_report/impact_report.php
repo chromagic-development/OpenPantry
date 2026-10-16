@@ -565,10 +565,27 @@ $protN = array_slice($protN, 0, 15);
 // those are the least certain figures on the page, and a household carries
 // home cans and boxes, not pounds of can. Rows with no counted scans are
 // skipped so a stray weighed row cannot draw a zero-length bar.
-$topPackaged = array_values(array_filter($topRows, function ($r) {
-    return $r['category'] === 'packaged' && $r['each'] > 0;
-}));
-usort($topPackaged, function ($a, $b) { return $b['each'] <=> $a['each']; });
+//
+// Two adjustments to the count. Raisins and dried cranberries count at a tenth
+// of what was scanned. Mac and cheese in all its spellings (and shells and
+// cheese) is counted on the Pasta bar rather than as its own; canned macaroni
+// and macaroni salad are not mac and cheese and keep their own rows.
+$pkgTenthRe   = '/\braisins\b|\bdried cranberr(?:y|ies)\b/i';   // not Raisin Bran
+$pkgAsPastaRe = '/\b(?:mac|macaroni|shells) (?:and|&) cheese\b/i';
+$pkgGroups = [];
+foreach ($topRows as $r) {
+    if ($r['category'] !== 'packaged' || $r['each'] <= 0) continue;
+    $g = preg_match($pkgAsPastaRe, $r['name']) ? 'Pasta' : $r['name'];
+    if (!isset($pkgGroups[$g])) {
+        $pkgGroups[$g] = ['name' => $g, 'count' => 0.0, 'each' => 0, 'est_lbs' => 0.0, 'items' => []];
+    }
+    $pkgGroups[$g]['count']   += $r['each'] * (preg_match($pkgTenthRe, $r['name']) ? 0.1 : 1.0);
+    $pkgGroups[$g]['each']    += $r['each'];
+    $pkgGroups[$g]['est_lbs'] += $r['est_lbs'];
+    $pkgGroups[$g]['items'][]  = $r['name'];
+}
+$topPackaged = array_values($pkgGroups);
+usort($topPackaged, function ($a, $b) { return $b['count'] <=> $a['count']; });
 $topPackaged = array_slice($topPackaged, 0, 15);
 
 // ── Sourcing: donated vs purchased ────────────────────────────────────────
@@ -733,15 +750,18 @@ if ($pdb !== null) {
 }
 $fillPct = $reqUnits > 0 ? round(100 * $reqFilled / $reqUnits) : 0;
 
-// ── The plate: the average order against accepted guidelines ─────────────
+// ── The plate: the average order against USDA MyPlate ────────────────────
 // The one card on the page about the *shape* of an order rather than its
-// size: what share of a household's food was fruit, vegetables, grains,
-// protein and dairy, drawn as a recommended plate (in the style of the
+// size: what share of the food handed out in a visit was fruit, vegetables,
+// grains, protein and dairy, drawn as a recommended plate (in the style of the
 // familiar USDA plate icon) beside a copy of it resized to the average order.
 //
-// Guideline portions: the plate model the accepted healthy-eating guides share
-// — half the plate fruits and vegetables together, a quarter grains, a quarter
-// protein. The guideline names no split between fruit and vegetables, so they
+// Guideline portions: USDA MyPlate, from the Dietary Guidelines 2020–2025 —
+// half the plate fruits and vegetables together, a quarter grains, a quarter
+// protein. The 2025–2030 edition dropped the plate and sets protein by body
+// weight, so it gives no split to compare against; the card names the edition
+// it uses rather than calling it the current guideline.
+// MyPlate names no split between fruit and vegetables, so they
 // are one section on the recommended plate and compared as one figure; the
 // average order still shows them apart. Dairy is the cup beside the plate
 // rather than a share of it, so it is measured against the plate: the Dietary
@@ -1006,16 +1026,110 @@ foreach (['fruits', 'vegetables', 'produce', 'grains', 'protein', 'snacks', 'dai
 $mpOrd = null;   // per-order detail is only needed for the spread
 $mpPlateLb = 0.0;
 foreach ($mpPlate as $g => $label) $mpPlateLb += $mpLb[$g];
+// ── Servings: the plate is compared in the guidelines' own units ──
+// The plate's split is not by weight. The Dietary Guidelines set each group's
+// daily amount in its own equivalents — cups of fruit, vegetables and dairy,
+// ounces of grains and protein — and a pound of each is a very different
+// number of them as handed out: a pound of dry pasta is 16 ounce-equivalents of
+// grain, a pound of fresh produce about 2½ cups, a pound of cheese over 10 cups
+// of dairy and a pound of milk under 2. So each item's pounds are converted to
+// its group's equivalents before the shares are taken, from the USDA's
+// definitions of one equivalent (MyPlate; the Food Patterns Equivalents
+// Database) applied to the food as handed out — fresh produce net of peel and
+// cores, canned goods as the whole can, grains and beans dry, meat raw.
+// Matched on the item's generic name within its group, first match wins, the
+// null row being the group's default.
+//
+// Snacks have no equivalent of their own. They are counted as grains by
+// weight — 1 oz is 1 oz-equivalent, as USDA counts crackers and grain-based
+// desserts — with the wet ones (puddings, gelatin, pies) scaled down by their
+// water, so the dessert plate sits on the same scale as the grain section.
+$mpEqRules = [
+    'fruits' => [
+        ['/dried|raisins?|prunes?|\bdates\b|chips/', 5.5],   // ½ cup dried = 1 cup
+        ['/\blemons?\b|\blimes?\b|melons?|cant[ae]loupe|honeydew|grapefruit/', 1.4],
+        ['/juice|canned|apple ?sauce|cocktail|mixed fruit|fruit mix|slices|\bcups?\b/', 1.8],
+        [null, 2.3],    // fresh, net of peel and cores
+    ],
+    'vegetables' => [
+        ['/instant/', 10.0],
+        ['/paste/', 6.0],
+        ['/canned|sauce|juice/', 1.8],
+        ['/frozen/', 3.3],
+        ['/avocados?/', 2.1],
+        ['/lettuce|spinach|greens|spring mix|\bkale\b|collards?|chard|cabbage|bok choy|cilantro|parsley|\bherbs?\b|basil/', 4.0],   // 2 cups raw leafy = 1 cup
+        [null, 2.8],    // fresh, as sold
+    ],
+    'grains' => [
+        ['/canned/', 4.0],
+        ['/\b(?:breads?|buns?|rolls?|bagels?|biscuits?|tortillas?|pitas?|waffles?)\b|muffins?(?! mix)/', 14.0],   // a slice = 1 oz-eq
+        [null, 16.0],   // dry: 1 oz pasta, rice, oats, flour or cereal = 1 oz-eq
+    ],
+    'snacks' => [
+        ['/pudding|gelatin|dessert/', 6.0],
+        ['/\bpies?\b|turnovers?|strudel/', 12.0],
+        [null, 16.0],   // crackers, chips, cookies, candy: 1 oz = 1 oz-eq
+    ],
+    'protein' => [
+        ['/peanut butter/', 28.0],   // 1 Tbsp = 1 oz-eq
+        ['/\bnuts?\b|almonds?|pistachios?|cashews?|peanuts?|walnuts?|pecans?|seeds/', 32.0],   // ½ oz = 1 oz-eq
+        ['/\beggs?\b/', 8.0],        // 1 egg = 1 oz-eq
+        ['/lentils?|split peas|\bdry\b|\bdried\b/', 24.0],   // ¼ cup cooked = 1 oz-eq
+        ['/hummus/', 15.0],          // 2 Tbsp = 1 oz-eq
+        ['/beans?|chick ?peas?|garbanzo|black[- ]eyed/', 6.4],   // canned
+        ['/tofu|tempeh/', 7.0],
+        ['/sticks|nuggets|breaded/', 10.0],
+        [null, 12.0],   // meat, poultry and fish raw, 1 oz cooked = 1 oz-eq
+    ],
+    'dairy' => [
+        ['/cottage/', 1.0],          // 2 cups = 1 cup-eq
+        ['/american|processed|singles|velveeta/', 8.0],   // 2 oz = 1 cup-eq
+        ['/cheese/', 10.7],          // 1½ oz = 1 cup-eq
+        ['/\bdry\b|powder/', 19.0],
+        ['/canned|evaporated|condensed/', 3.6],
+        [null, 1.86],   // milk, yogurt, kefir: 1 cup = 1 cup-eq
+    ],
+];
+// Daily amounts in the Dietary Guidelines' 2,000-calorie pattern, and the unit
+// each is counted in. Snacks are counted against the grains'.
+$mpDaily = ['fruits' => 2.0, 'vegetables' => 2.5, 'grains' => 6.0, 'protein' => 5.5,
+            'snacks' => 6.0, 'dairy' => 3.0];
+$mpUnit  = ['fruits' => 'cup', 'vegetables' => 'cup', 'produce' => 'cup', 'grains' => 'oz',
+            'protein' => 'oz', 'snacks' => 'oz', 'dairy' => 'cup'];
+$mpEqPerLb = function (string $name, string $group) use ($mpEqRules): float {
+    $low = mb_strtolower($name);
+    foreach ($mpEqRules[$group] ?? [] as [$re, $eq]) {
+        if ($re === null || preg_match($re, $low)) return (float)$eq;
+    }
+    return 0.0;
+};
+// Equivalents in the average order, by group.
+$mpEq = array_fill_keys(array_keys($mpDaily), 0.0);
+foreach ($mpDaily as $g => $d) {
+    foreach ($mpItems[$g] ?? [] as $name => $it) $mpEq[$g] += $it['lb'] * $mpEqPerLb((string)$name, $g);
+}
+$mpEq['produce'] = $mpEq['fruits'] + $mpEq['vegetables'];
+// Plate points: each group's equivalents at the size the recommended plate
+// gives one of them, so a day of the guideline is exactly 100 points on the
+// plate. The 4½ cups of fruit and vegetables fill half of it, the 6 oz of
+// grains and the 5½ oz of protein a quarter each, and a cup of dairy counts as
+// a cup of fruit, which is how the recommended cup is sized.
+$mpPtsPerEq = ['fruits' => 50 / 4.5, 'vegetables' => 50 / 4.5, 'grains' => 25 / 6,
+               'protein' => 25 / 5.5, 'snacks' => 25 / 6, 'dairy' => 50 / 4.5];
+$mpPts = [];
+foreach ($mpPtsPerEq as $g => $k) $mpPts[$g] = $mpEq[$g] * $k;
+$mpPlatePts = 0.0;
+foreach ($mpPlate as $g => $label) $mpPlatePts += $mpPts[$g];
 // A plate needs the scanned half of the order: with counter requests alone it
 // would be nothing but eggs, cheese and frozen meat.
-$hasMyPlate = $totOrders > 0 && $mpPlateLb > 0;
+$hasMyPlate = $totOrders > 0 && $mpPlatePts > 0;
 
 // Whole-number shares that still add to 100, by largest remainder, so the
 // table never shows a plate of 99% or 101%.
 $mpShare = array_fill_keys(array_keys($mpPlate), 0);
 if ($hasMyPlate) {
     $raw = [];
-    foreach ($mpPlate as $g => $label) $raw[$g] = 100 * $mpLb[$g] / $mpPlateLb;
+    foreach ($mpPlate as $g => $label) $raw[$g] = 100 * $mpPts[$g] / $mpPlatePts;
     foreach ($raw as $g => $v) $mpShare[$g] = (int)floor($v);
     $left = 100 - array_sum($mpShare);
     $rem  = [];
@@ -1026,7 +1140,7 @@ if ($hasMyPlate) {
         $mpShare[$g]++;
     }
 }
-$mpDairyPct = $hasMyPlate ? 100 * $mpLb['dairy'] / $mpPlateLb : 0.0;
+$mpDairyPct = $hasMyPlate ? 100 * $mpPts['dairy'] / $mpPlatePts : 0.0;
 
 // ── Days of food: the average order against a household's calorie needs ──
 // The plate card says what the average order is made of; this one says how
@@ -1159,7 +1273,7 @@ $kcalRules = [
         ['/\beggs?\b/', 570],
         ['/bacon|sausages?|hot dogs?|bratwurst|kielbasa|bologna|liverwurst|salami|pepperoni|jerky/', 1400],
         ['/canned|tuna|clams?/', 480],
-        ['/lentils?|split peas|\bdry\b|dried/', 1600],
+        ['/lentils?|split peas|\bdry\b|\bdried\b/', 1600],
         ['/beans?|chick ?peas?|garbanzo|black[- ]eyed|hummus/', 450],
         ['/tofu|tempeh/', 350],
         ['/sticks|nuggets|breaded|burgers?|patties/', 1000],
@@ -1229,7 +1343,7 @@ $hasDays   = $hasMyPlate && $hhOrders > 0 && $hhKcalDay > 0 && $kcalOrder > 0;
 $daysFood  = $hasDays ? $kcalOrder / $hhKcalDay : 0.0;
 
 // The cart's contents: each food group's share of the average order's pounds
-// — the plates and the cup together, as the plate card weighs them — as a
+// — the plate card's groups, the plates and the cup together — as a
 // fixed number of grocery items, so that each item is the same slice of the
 // order and the count of each kind can be read as its share.
 define('CART_UNITS', 30);
@@ -1909,7 +2023,8 @@ renderNav('impact');
   <div class="card">
     <h2>🥫 Top Canned or Packaged Items Distributed</h2>
     <p class="lede" style="margin-bottom:10px;">
-      Canned and packaged goods only, ranked by count.
+      Canned and packaged goods only, ranked by count. Raisins and dried cranberries
+      count at a tenth of the boxes scanned, and mac and cheese is counted as pasta.
     </p>
     <?php if ($topPackaged): ?>
       <div class="chart-wrap" style="height:<?= max(280, count($topPackaged) * 26 + 70) ?>px;"><canvas id="packagedChart"></canvas></div>
@@ -1921,15 +2036,20 @@ renderNav('impact');
   <div class="card">
     <h2>🍽 The Average Order on the Plate</h2>
     <p class="lede" style="margin-bottom:10px;">
-      How a household's food measures up against accepted dietary guidelines for a
-      balanced plate: <strong>half fruits and vegetables, a quarter grains, a quarter
-      protein</strong>, with dairy on the side. On the left is the recommended plate; on
+      An estimate of how the food in an average visit measures up against the USDA
+      <strong>MyPlate</strong> pattern (<em>Dietary Guidelines for Americans,
+      2020&ndash;2025</em>): <strong>half fruits and vegetables, a quarter grains, a quarter
+      protein</strong>, with dairy on the side. It describes what the pantry hands out in
+      one visit, not everything a household eats. On the left is the MyPlate plate; on
       the right, the same plate with each section resized to that food group's share of
-      the average order's pounds, so a larger section means more of the order. The dairy
-      cup grows or shrinks against the recommended cup the same way. Snack foods and
-      sweets go on the <strong>dessert plate</strong> below the cup and count toward the
-      plate's 100%; the guidelines give them no portion, only advice to limit them, so
-      the recommended dessert plate is empty.
+      the average order, so a larger section means more of the order. The order is
+      measured in MyPlate's own servings &mdash; cups of fruit, vegetables and dairy,
+      ounces of grains and protein &mdash; rather than pounds, since a pound of dry pasta is
+      far more servings than a pound of lettuce. The dairy cup grows or shrinks against
+      MyPlate's cup the same way. Snack foods and
+      sweets go on the <strong>dessert plate</strong> below the cup, counted as ounces of
+      grain, and count toward the plate's 100%; MyPlate gives them no portion, only
+      advice to limit them, so its dessert plate is empty.
     </p>
     <?php if ($hasMyPlate):
       $mpSwatch = ['fruits' => '#D01A21', 'vegetables' => '#2CAC42', 'grains' => '#D45914',
@@ -1947,6 +2067,10 @@ renderNav('impact');
           return '<td class="num">' . ($mpMean[$g] > 0 ? '&plusmn;&nbsp;' . opN($mpSd[$g], 1) : '&mdash;') . '</td>'
                . '<td><span class="mp-spread">' . $label . '</span>'
                . ($detail !== '' ? '<span class="mp-note">' . $detail . '</span>' : '') . '</td>';
+      };
+      // The Servings cell for one row, in the group's own unit.
+      $mpEqCell = function (string $g) use ($mpEq, $mpUnit): string {
+          return '<td class="num">' . ($mpEq[$g] > 0 ? opN($mpEq[$g], 1) . '&nbsp;' . ($mpUnit[$g] === 'cup' ? 'cups' : 'oz') : '&mdash;') . '</td>';
       }; ?>
       <div class="plate-pair">
         <figure>
@@ -1954,9 +2078,9 @@ renderNav('impact');
                             'grains' => $mpGuide['grains'], 'protein' => $mpGuide['protein'],
                             'snacks' => $mpGuide['snacks']],
                 1.0, $mpGuideDairy, 'mpg',
-                'Accepted guidelines: fruits and vegetables 50%, grains 25%, protein 25%, an empty dessert plate for snacks, and a dairy cup',
+                'USDA MyPlate: fruits and vegetables 50%, grains 25%, protein 25%, an empty dessert plate for snacks, and a dairy cup',
                 ['vegetables' => ['Fruits &', 'Vegetables']]) ?>
-          <figcaption><strong>Accepted Guidelines</strong>the recommended plate</figcaption>
+          <figcaption><strong>USDA MyPlate</strong>Dietary Guidelines 2020&ndash;2025</figcaption>
         </figure>
         <figure>
           <?= opMyPlateSvg($mpShare, $mpDairyPct / $mpGuideDairy, $mpDairyPct, 'mpa', $mpTitle) ?>
@@ -1970,9 +2094,10 @@ renderNav('impact');
         <thead>
           <tr>
             <th>Food Group</th>
-            <th class="num">Guideline</th>
+            <th class="num">MyPlate</th>
             <th class="num">Our Average Order</th>
             <th class="num">Difference</th>
+            <th class="num" title="MyPlate's own units: cup-equivalents of fruit, vegetables and dairy, ounce-equivalents of grains and protein. Snacks are counted as ounces of grain. A day of the 2,000-calorie pattern is 2 cups of fruit, 2½ of vegetables, 6 oz of grains, 5½ oz of protein and 3 cups of dairy.">Servings per Order</th>
             <th class="num">Avg lb per Order</th>
             <th class="num" title="Standard deviation across orders: how far a single order's pounds of the group typically sit from the average.">Std Dev (lb)</th>
             <th title="The standard deviation read against the average: under half of it is tightly clustered, over the average itself is widely spread.">Spread</th>
@@ -1984,6 +2109,7 @@ renderNav('impact');
             <td class="num"><?= $mpGuide['produce'] ?>%</td>
             <td class="num"><?= $mpProduce ?>%</td>
             <td class="num"><?= opMpDiff($mpProduce - $mpGuide['produce']) ?></td>
+            <?= $mpEqCell('produce') ?>
             <td class="num"><?= opN($mpMean['produce'], 1) ?></td>
             <?= $mpSdCells('produce') ?>
           </tr>
@@ -1993,6 +2119,7 @@ renderNav('impact');
             <td class="num"></td>
             <td class="num"><?= $mpShare[$g] ?>%</td>
             <td class="num"></td>
+            <?= $mpEqCell($g) ?>
             <td class="num"><?= opN($mpLb[$g], 1) ?></td>
             <?= $mpSdCells($g) ?>
           </tr>
@@ -2003,6 +2130,7 @@ renderNav('impact');
             <td class="num"><?= $mpGuide[$g] ?>%</td>
             <td class="num"><?= $mpShare[$g] ?>%</td>
             <td class="num"><?= opMpDiff($mpShare[$g] - $mpGuide[$g]) ?></td>
+            <?= $mpEqCell($g) ?>
             <td class="num"><?= opN($mpLb[$g], 1) ?></td>
             <?= $mpSdCells($g) ?>
           </tr>
@@ -2013,6 +2141,7 @@ renderNav('impact');
             <td class="num"><?= $mpGuide['snacks'] ?>%</td>
             <td class="num"><?= $mpShare['snacks'] ?>%</td>
             <td class="num"><?= opMpDiff($mpShare['snacks'] - $mpGuide['snacks']) ?></td>
+            <?= $mpEqCell('snacks') ?>
             <td class="num"><?= opN($mpLb['snacks'], 1) ?></td>
             <?= $mpSdCells('snacks') ?>
           </tr>
@@ -2022,13 +2151,14 @@ renderNav('impact');
             <td class="num"><?= round($mpGuideDairy) ?>%</td>
             <td class="num"><?= round($mpDairyPct) ?>%</td>
             <td class="num"><?= opMpDiff((int)round($mpDairyPct) - (int)round($mpGuideDairy)) ?></td>
+            <?= $mpEqCell('dairy') ?>
             <td class="num"><?= opN($mpLb['dairy'], 1) ?></td>
             <?= $mpSdCells('dairy') ?>
           </tr>
         </tbody>
         <tfoot>
           <tr class="total-row">
-            <td colspan="4">Plates and cup together</td>
+            <td colspan="5">Plates and cup together</td>
             <td class="num"><?= opN($mpMean['total'], 1) ?></td>
             <?= $mpSdCells('total') ?>
           </tr>
@@ -2480,23 +2610,42 @@ renderNav('impact');
         canned chicken, canned tuna and chicken-noodle soup stay in the
         counted-items bucket. These pounds are subtracted from that bucket,
         never added on top of it.</li>
-      <li><strong>The plate is a comparison by weight.</strong> The recommended plate
-        follows the split accepted healthy-eating guidelines share: half the plate fruits
-        and vegetables, a quarter grains and a quarter protein. The guidelines set no
-        split between fruit and vegetables, so the two are compared as one figure, with
-        each still shown on its own for the average order. Snack foods and sweets sit on
-        a dessert plate that counts toward the same 100%; the guidelines give them no
-        portion, only advice to limit them, so their recommended share is 0% and every
-        pound of them is a pound the other groups don't get. Dairy is the cup beside the
-        plates, so it is measured against them: the Dietary Guidelines' 2,000-calorie
-        pattern pairs 3 cups of dairy with the 4&frac12; cups of fruit and vegetables that
-        fill half the plate, which puts the cup at <?= round($mpGuideDairy) ?>% of the
-        plate. The average order is weighed
+      <li><strong>The plate is a comparison in servings, not pounds.</strong> It measures
+        what the pantry hands out in one visit, not a household's whole diet. The
+        recommended plate is USDA MyPlate, built on the <em>Dietary Guidelines for
+        Americans, 2020&ndash;2025</em>: half the plate fruits and vegetables, a quarter
+        grains and a quarter protein. The 2025&ndash;2030 edition sets its amounts
+        differently &mdash; 3 servings of vegetables, 2 of fruit, 2 to 4 of whole grains, 3
+        of dairy, and protein by body weight rather than in ounces &mdash; and gives no plate,
+        so the plate here is the 2020&ndash;2025 one. MyPlate sets no split between fruit and
+        vegetables, so the two are compared as one figure, with each still shown on its
+        own for the average order. Snack foods and sweets sit on a dessert plate that
+        counts toward the same 100%; MyPlate gives them no portion, only advice to limit
+        them, so their recommended share is 0% and every serving of them is one the other
+        groups don't get. Dairy is the cup beside the plates, so it is measured against
+        them: the 2,000-calorie pattern pairs 3 cups of dairy with the 4&frac12; cups of
+        fruit and vegetables that fill half the plate, which puts the cup at
+        <?= round($mpGuideDairy) ?>% of the plate. MyPlate sizes each group in its own servings &mdash; cup-equivalents
+        of fruit, vegetables and dairy, ounce-equivalents of grains and protein &mdash; so
+        the average order is compared in them too: a day of the 2,000-calorie pattern (2
+        cups of fruit, 2&frac12; of vegetables, 6 oz of grains, 5&frac12; oz of protein, 3
+        cups of dairy) fills the recommended plate and cup exactly. Each item's pounds are
+        converted by USDA's definition of one serving, applied to the food as handed out:
+        about 2&frac14; cups a pound for fresh fruit net of peel and 2&frac34; for fresh
+        vegetables (4 for leafy ones, where 2 cups raw count as 1), 1.8 for canned fruit,
+        vegetables and juice, 16 oz a pound for dry pasta, rice, oats and cereal and 14 for
+        bread, 12 for raw meat and fish, 8 for eggs, 6.4 for canned beans, 24 for dry beans
+        and 28 for peanut butter, 1.9 cups a pound for milk and yogurt and 10.7 for cheese.
+        Snacks have no serving of their own and are counted as ounces of grain &mdash; 16 a
+        pound, as USDA counts crackers and grain-based desserts, fewer for puddings and pies
+        by their water &mdash; so the dessert plate sits on the grain section's scale. These
+        are typical figures, not each product's label, so a share is close rather than
+        exact. The pounds behind them are weighed
         the same way as the rest of this page &mdash; produce at its scale weight, or its
         Avg Wt when sold by the piece; milk from the size in its generic name at 8.6 lb a
         gallon; everything else at its Avg Wt, or
-        <?= htmlspecialchars((string)$lbPerItem) ?> lb each with none on record &mdash;
-        and is the average scanned basket (<?= opN($totOrders) ?> orders, counter items
+        <?= htmlspecialchars((string)$lbPerItem) ?> lb each with none on record. The
+        average order is the average scanned basket (<?= opN($totOrders) ?> orders, counter items
         set aside) plus the average counter request<?= $mpUseCounter
           ? ' (' . opN($reqOrders) . ' requests, filled units only)' : '' ?>. The two are
         averaged separately because the counter records every visit and the scanner only
@@ -2755,8 +2904,10 @@ renderNav('impact');
     var pkg = <?= json_encode(array_map(function ($r) {
         return [
             'name'  => $r['name'],
-            'value' => $r['each'],
+            'value' => round($r['count'], 1),
+            'each'  => $r['each'],
             'lbs'   => round($r['est_lbs'], 1),
+            'items' => $r['items'],
         ];
     }, $topPackaged)) ?>;
     if (pkg.length) new Chart(document.getElementById('packagedChart'), {
@@ -2776,7 +2927,12 @@ renderNav('impact');
           legend:{ display:false },
           tooltip:{ callbacks:{ label: function (c) {
             var r = pkg[c.dataIndex];
-            return r.value + (r.value === 1 ? ' item' : ' items') + ' (' + r.lbs + ' est. lb)';
+            var s = r.value + (r.value === 1 ? ' item' : ' items');
+            if (r.value !== r.each) s += ' (' + r.each + ' scanned, counted at a tenth)';
+            return s + ' (' + r.lbs + ' est. lb)';
+          }, afterLabel: function (c) {
+            var r = pkg[c.dataIndex];
+            return r.items.length > 1 ? 'Includes ' + r.items.join(', ') : '';
           } } }
         },
         scales:{
