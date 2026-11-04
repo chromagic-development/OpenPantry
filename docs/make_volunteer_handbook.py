@@ -478,8 +478,10 @@ E.append(step(5, "Done helping for good? Tap <b>Leave Assist</b> — the only wa
                  "back to starting orders of your own."))
 E.append(bullet(
     "While waiting between orders, scanning an item joins the next order and "
-    "records it there. If nobody has started one yet, the scanner buzzes and "
-    "nothing is recorded."))
+    "records it there. If nobody has started one yet, your device sounds a loud "
+    "run of low honks (even with <b>Beep on each scan</b> off) and that item is "
+    "<b>not</b> recorded — wait for the other station to scan its first item, "
+    "then scan yours again."))
 E.append(bullet(
     "If your station has the <b>Assist</b> command barcode posted, scanning it "
     "does the same thing as tapping <b>+ Assist</b>, so you never have to "

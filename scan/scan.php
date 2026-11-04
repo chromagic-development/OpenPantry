@@ -792,6 +792,7 @@ const MY_STATION = <?= json_encode($myStation) ?>;
 //   readyBeep()  — soft short tick: platform clear, take the next item.
 //   lostBeep()   — three long falling notes: the server can't be reached.
 //   restoredBeep() — the same three notes rising: connection back, carry on.
+//   warnBeep()   — two bursts of loud honks: assist station scanned with no order.
 let audioCtx = null;
 
 // Chrome will not let an AudioContext start until the page has seen a real
@@ -910,6 +911,23 @@ function lostBeep() {
 function restoredBeep() {
   playTones([[0, 523, 0.16, 'triangle'], [0.18, 659, 0.16, 'triangle'],
              [0.36, 784, 0.34, 'triangle']], 0.55);                          // C5 E5 G5
+}
+// Two bursts of three loud, low sawtooth honks — "no, no, no": an assist station
+// in assist mode scanned an item with no order to put it on (the station it
+// helps hasn't scanned its first item yet), so the item was NOT recorded. The
+// operator is usually on the far side of the cart with the screen out of
+// sight, so this is meant to carry across a room and not be mistaken for an
+// item that went through.
+// Low and steady rather than errorBeep()'s falling pair, and slower and lower
+// than alarmBeep()'s alternating siren, so the recall alarm stays unique. It
+// sounds whatever the Beep on each scan switch says: that switch silences the
+// confirmation of items that did record, never a warning that one didn't.
+function warnBeep() {
+  const tones = [];
+  for (let i = 0; i < 6; i++) {
+    tones.push([i * 0.17 + (i >= 3 ? 0.20 : 0), 247, 0.13, 'sawtooth']);   // B3
+  }
+  playTones(tones, 0.60);
 }
 
 const $ = (id) => document.getElementById(id);
@@ -1307,7 +1325,7 @@ async function startOrderIfNeeded() {
   // and this never runs, but an operator can beat the 2.5s tick. The server
   // refuses 'start' in this state anyway; this turns that refusal into the
   // join the operator meant.
-  if (state.assistMode) return await joinNextOrderToAssist();
+  if (state.assistMode) return await joinNextOrderToAssist({ forItem: true });
   if (!startingOrder) {
     startingOrder = (async () => {
       const r = await postJson('../api_order.php', {action:'start'});
@@ -4006,14 +4024,25 @@ $('assistCard').addEventListener('click', async (e) => {
 // scanner, not the Assist card. Used by command barcode 990002 and, in assist
 // mode, by the first scan of the next order. Returns whether this station came
 // out of it attached to an order.
-async function joinNextOrderToAssist() {
+//
+// opts.forItem: called because an item was scanned or weighed (assist mode,
+// between orders), not by the 990002 command code. A refusal then means a real
+// package was dropped on the floor, so it gets warnBeep() and says so plainly.
+async function joinNextOrderToAssist(opts) {
+  const forItem = !!(opts && opts.forItem);
   const r = await postJson('../api_order.php', {action: 'assist_auto'});
   if (!r.ok) {
-    // Either several orders were open, or the one candidate closed between the
-    // last poll and the scan. Clear the fingerprint so the next tick redraws
-    // the card from fresh state either way.
+    // Either no other station has an order open yet (usually: it hasn't
+    // scanned its first item), several are, or the one candidate closed
+    // between the last poll and the scan. Clear the fingerprint so the next
+    // tick redraws the card from fresh state either way.
     lastFingerprint = null;
-    flash(r.error || 'Could not join an order', 'error');
+    const msg = r.error || 'Could not join an order';
+    if (forItem) {
+      flash('Item NOT recorded — ' + msg, 'error', { beep: warnBeep, ms: 7000 });
+    } else {
+      flash(msg, 'error');
+    }
     return false;
   }
   applySync(r);
