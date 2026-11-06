@@ -50,6 +50,7 @@ $today = date('M j, Y');
 <head>
 <meta charset="utf-8">
 <link rel="icon" type="image/x-icon" href="../menucounter/favicon.ico">
+<link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <title>Call Sheet — <?= htmlspecialchars($groupFilter) ?> — <?= htmlspecialchars($today) ?></title>
 <style>
   body { font-family: Arial, Helvetica, sans-serif; margin: 0; color: #000; background:#fff; }

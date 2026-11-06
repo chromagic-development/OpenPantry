@@ -107,6 +107,7 @@ $hasData = ($totalOrders > 0);
 <html lang="en">
 <head>
 <link rel="icon" type="image/x-icon" href="../../favicon.ico">
+<link rel="apple-touch-icon" href="../../../apple-touch-icon.png">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Footprints – Daily Volume Report</title>

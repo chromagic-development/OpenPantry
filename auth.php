@@ -297,6 +297,7 @@ function renderLoginWall(?string $error, array $gate = ['mode' => 'open', 'wait'
     }
     ?><!DOCTYPE html><html lang="en"><head>
     <link rel="icon" type="image/x-icon" href="<?= $p ?>menucounter/favicon.ico">
+    <link rel="apple-touch-icon" href="<?= $p ?>apple-touch-icon.png">
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenPantry – Admin Login</title>
     <style>
