@@ -358,6 +358,32 @@ $dowOrders  = array_fill(0, 7, 0);         // 0 = Sunday
 // the whole of the household detail available here — and it is not PII.
 $delOrders = 0; $delAdults = 0; $delKids = 0;
 
+// ── Who is served: household make-up ──────────────────────────────────────
+// The same two channels that feed People Reached — home deliveries here and
+// counter requests further down — tallied by the shape of the household
+// rather than by head count: how big it is, and whether it has children.
+// Counted per visit, like everything else on the page, so a household that
+// comes weekly weighs in each week. A record with no adults and no children
+// has no household size at all and is left out (and counted in $wsNoSize, so
+// the Methodology card can say how many) rather than booked as nobody.
+define('WS_MAX_SIZE', 7);   // last band on the chart: this many people or more
+$wsSizes    = array_fill(1, WS_MAX_SIZE, ['adults' => 0, 'kids' => 0]);
+$wsVisits   = 0;   // visits with a household size on record
+$wsWithKids = 0;   // of those, households with at least one child
+$wsAdults   = 0;
+$wsKids     = 0;
+$wsNoSize   = 0;
+$wsTally = function (int $a, int $k) use (&$wsSizes, &$wsVisits, &$wsWithKids,
+                                          &$wsAdults, &$wsKids, &$wsNoSize): void {
+    $a = max(0, $a); $k = max(0, $k);
+    if ($a + $k === 0) { $wsNoSize++; return; }
+    $wsVisits++;
+    $wsAdults += $a;
+    $wsKids   += $k;
+    if ($k > 0) $wsWithKids++;
+    $wsSizes[min(WS_MAX_SIZE, $a + $k)][$k > 0 ? 'kids' : 'adults']++;
+};
+
 foreach ($orderRows as $r) {
     $m   = (string)$r['month'];
     $ch  = (string)$r['channel'];
@@ -405,6 +431,9 @@ foreach ($orderRows as $r) {
         $a = (int)$hm[1]; $k = (int)$hm[2];
         $delAdults += $a; $delKids += $k;
         if (isset($monthIndex[$m])) { $mAdults[$m] += $a; $mKids[$m] += $k; }
+        $wsTally($a, $k);
+    } elseif ($ch === 'Delivery') {
+        $wsNoSize++;   // a delivery whose note carries no household size
     }
 }
 
@@ -696,6 +725,7 @@ if ($pdb !== null) {
             $reqOrders++;
             $a = (int)$r['adults']; $k = (int)$r['children'];
             $reqAdults += $a; $reqKids += $k;
+            $wsTally($a, $k);
             // Names are read only to count distinct households and are never
             // displayed or stored anywhere on this page.
             $h = (string)$r['household'];
@@ -1369,6 +1399,16 @@ if ($cartLb > 0) {
 // size. Only the two channels that record household size contribute (home
 // delivery notes and counter requests), so this understates total reach.
 $peopleVisits = $delAdults + $delKids + $reqAdults + $reqKids;
+
+// Who Is Served, in three bands: living alone, 2–4, and 5 or more.
+$wsBand = function (int $from, int $to) use ($wsSizes): int {
+    $n = 0;
+    for ($s = $from; $s <= $to; $s++) $n += $wsSizes[$s]['adults'] + $wsSizes[$s]['kids'];
+    return $n;
+};
+$wsOne   = $wsBand(1, 1);
+$wsMid   = $wsBand(2, 4);
+$wsLarge = $wsBand(5, WS_MAX_SIZE);
 
 $hasData = $totOrders > 0 || $reqOrders > 0;
 
@@ -2426,6 +2466,27 @@ renderNav('impact');
   </div>
   <?php endif; ?>
 
+  <?php if ($wsVisits > 0): ?>
+  <div class="card">
+    <h2>🏠 Who Is Served</h2>
+    <p class="lede" style="margin-bottom:14px;">
+      The size and make-up of the households behind
+      <strong><?= opN($wsVisits) ?></strong> visits &mdash; the home deliveries and
+      counter requests, the two channels that record who the food is for. Counted
+      per visit, so a household that comes every week is counted every week.
+    </p>
+    <div class="stat-grid">
+      <div class="stat"><div class="v"><?= opPct($wsKids, $wsAdults + $wsKids) ?></div><div class="k">Of People Reached Are Children</div></div>
+      <div class="stat"><div class="v"><?= opPct($wsWithKids, $wsVisits) ?></div><div class="k">Of Households Have Children</div></div>
+      <div class="stat"><div class="v"><?= opN(($wsAdults + $wsKids) / $wsVisits, 1) ?></div><div class="k">Average Household Size</div></div>
+      <div class="stat"><div class="v"><?= opPct($wsOne, $wsVisits) ?></div><div class="k">One-Person Households</div></div>
+      <div class="stat"><div class="v"><?= opPct($wsMid, $wsVisits) ?></div><div class="k">Households of 2&ndash;4</div></div>
+      <div class="stat"><div class="v"><?= opPct($wsLarge, $wsVisits) ?></div><div class="k">Households of 5 or More</div></div>
+    </div>
+    <div class="chart-wrap" style="height:300px; margin-top:16px;"><canvas id="whoChart"></canvas></div>
+  </div>
+  <?php endif; ?>
+
   <div class="card">
     <h2>📋 Monthly Detail</h2>
     <table class="data">
@@ -2689,6 +2750,17 @@ renderNav('impact');
       <li><strong>People reached is a floor.</strong> Household size is recorded only for
         home deliveries and counter requests; in-pantry shopping and event orders carry no
         household count, so real reach is higher than the figure shown.</li>
+      <?php if ($wsVisits > 0): ?>
+      <li><strong>Who Is Served describes visits, not distinct families.</strong> It covers
+        the <?= opN($wsVisits) ?> home deliveries and counter requests that recorded a
+        household size<?= $wsNoSize > 0
+          ? '; ' . opN($wsNoSize) . ' more recorded none and are left out' : '' ?>.
+        Each visit counts once, so a household that comes often weighs more than one that
+        comes once, and in-pantry shopping and event orders are not represented at all. A
+        household &ldquo;has children&rdquo; when it listed at least one. Only a count of
+        adults and of children is recorded &mdash; no ages &mdash; so seniors cannot be
+        reported separately.</li>
+      <?php endif; ?>
       <li><strong>Sourcing is apportioned, not logged per scan.</strong> Nothing
         records where a particular can came from, so the pounds distributed in this period
         are split at each item's <strong>Bought&nbsp;%</strong> &mdash; its lifetime
@@ -3058,6 +3130,34 @@ renderNav('impact');
           x:{ stacked:true, grid:{ color:GRID }, ticks:{ maxRotation:45 } },
           y:{ stacked:true, beginAtZero:true, grid:{ color:GRID }, ticks:{ precision:0 },
               title:{ display:true, text:'People (person-visits)', color:BROWN, font:{ weight:'bold' } } }
+        }
+      }
+    });
+    <?php endif; ?>
+
+    <?php if ($wsVisits > 0): ?>
+    new Chart(document.getElementById('whoChart'), {
+      type:'bar',
+      data:{
+        labels:<?= json_encode(array_map(function ($s) {
+            return $s === 1 ? '1 person' : ($s === WS_MAX_SIZE ? $s . '+ people' : $s . ' people');
+        }, array_keys($wsSizes))) ?>,
+        datasets:[
+          { label:'Adults only',   data:<?= json_encode(array_column($wsSizes, 'adults')) ?>,
+            backgroundColor:BROWN, borderRadius:3 },
+          { label:'With children', data:<?= json_encode(array_column($wsSizes, 'kids')) ?>,
+            backgroundColor:GREEN, borderRadius:3 }
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{ mode:'index', intersect:false },
+        plugins:{ legend:{ position:'top' } },
+        scales:{
+          x:{ stacked:true, grid:{ display:false },
+              title:{ display:true, text:'Household size', color:BROWN, font:{ weight:'bold' } } },
+          y:{ stacked:true, beginAtZero:true, grid:{ color:GRID }, ticks:{ precision:0 },
+              title:{ display:true, text:'Household visits', color:BROWN, font:{ weight:'bold' } } }
         }
       }
     });
