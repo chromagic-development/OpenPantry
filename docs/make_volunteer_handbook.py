@@ -33,7 +33,7 @@ E += cover(
     subtitle="Volunteer Handbook",
     badge_text="FOR VOLUNTEERS",
     blurb="How to open and run the checkout and Menu Counter stations.",
-    revision="Revised October 2026 &nbsp;•&nbsp; Version 1.4")
+    revision="Revised November 2026 &nbsp;•&nbsp; Version 1.5")
 
 # ================================================================ welcome
 E.append(kicker("START HERE"))
@@ -178,37 +178,65 @@ E.append(Paragraph(
 
 E.append(Paragraph("Scan the PLU first", S["h3"]))
 E.append(body(
-    "Scan the produce code. A <b>Weight required</b> window pops up and the "
-    "station beeps:"))
+    "Scan the produce code. The station chirps, and what you see next depends "
+    "on the scale at your station:"))
 E.append(bullet(
-    "<b>Using the scale:</b> just set the item on the scale. If it's in "
-    "“PC” mode (see the checklist) the weight fills in by itself "
-    "— confirm and it saves."))
+    "<b>With a USB scale:</b> a green strip above the barcode box names the "
+    "item and reads <b>waiting for the scale</b>. Set the item on the scale; "
+    "when the reading settles the item records by itself and the strip goes "
+    "away. Nothing pops up, so you can keep scanning other items while you "
+    "wait."))
+E.append(bullet(
+    "<b>Without one</b> (an older cable-connected scale, no scale, or a USB "
+    "scale that has gone to sleep): a <b>Weight required</b> window pops up. "
+    "A cable-connected scale in “PC” mode (see the checklist) fills "
+    "the weight in and saves it by itself; otherwise type it by hand. Finish "
+    "this window before you scan anything else."))
 E.append(bullet(
     "<b>By hand:</b> type 1 digit for pounds, then 2 digits for ounces. "
     "Example: typing <b>514</b> means <b>5 lb 14 oz</b>. Backspace fixes a "
-    "slip; press <b>Enter</b> or <b>Save Weight</b>."))
+    "slip; press <b>Enter</b> or <b>Save Weight</b>. On a USB-scale station, "
+    "tap <b>Type Weight</b> on the green strip to open this window."))
+E.append(bullet(
+    "<b>Scanned the wrong code?</b> Scan the right one and it takes the first "
+    "one's place, or tap <b>Cancel Item</b> on the strip and nothing is "
+    "recorded."))
 
 E.append(Paragraph("Or weigh it first", S["h3"]))
 E.append(body(
     "Set the item on the scale and leave it alone. The scale sends nothing "
     "until the reading settles, and then it sends it on its own — you don't "
-    "press anything. The station catches the weight, beeps, and opens a "
-    "<b>Weighed — PLU required</b> window with the weight shown at the "
-    "top. (On an older cable-connected scale this half needs it in "
-    "“PC” mode — in <b>print</b> mode it only sends when you "
-    "press <b>PRINT</b>. A USB scale needs no setting at all.)"))
-E.append(step(1, "Scan the PLU sticker (or type the code and press "
-                 "<b>Enter</b>). The weight you already took and the code are "
-                 "saved together as one line."))
-E.append(step(2, "Don't know the code? Tap <b>Type a name instead</b> and "
-                 "start typing the produce name — only items sold by the pound "
-                 "are offered, so you can't accidentally pick something that "
-                 "would throw the weight away. Pick a match and its PLU is "
-                 "filled in for you."))
+    "press anything. The station catches the weight and chirps."))
+E.append(body(
+    "With a <b>USB scale</b>, a green strip above the barcode box reads "
+    "<b>Weight held</b> with the weight beside it, and the station simply "
+    "waits for you. No window opens and the scanner keeps working, so you can "
+    "go on scanning packaged items for as long as you like before you say "
+    "what the produce is."))
+E.append(step(1, "When you're ready, scan the PLU sticker (or type the code "
+                 "into the barcode box and press <b>Enter</b>). The held "
+                 "weight and the code are saved together as one line. Anything "
+                 "else you scan first — a can, a box, produce counted by the "
+                 "each — is recorded as usual and the weight goes on waiting."))
+E.append(step(2, "Don't know the code? Type the produce name into the barcode "
+                 "box and pick the match. Or tap <b>Enter PLU</b> on the "
+                 "strip: that opens a window with a number pad and a <b>Type "
+                 "a name instead</b> button that offers only items sold by "
+                 "the pound."))
 E.append(step(3, "Wrong item on the scale, or you'd rather start over? "
-                 "<b>Discard Weight</b> throws the reading away and nothing is "
-                 "recorded."))
+                 "<b>Discard Weight</b> on the strip throws the reading away "
+                 "and nothing is recorded."))
+E.append(body(
+    "On an older <b>cable-connected scale</b> the station opens a "
+    "<b>Weighed — PLU required</b> window instead of the strip, with the "
+    "weight shown at the top — enter the PLU there before scanning anything "
+    "else. This half needs that scale in “PC” mode — in "
+    "<b>print</b> mode it only sends when you press <b>PRINT</b>."))
+E.append(good("KEEP SCANNING WHILE THE SCALE SETTLES",
+    "With a USB scale, nothing the scale does takes the scanner away from "
+    "you. Drop the produce on the scale, carry on scanning the rest of the "
+    "cart, and enter the PLU whenever it suits you — the green strip keeps "
+    "the weight until you do."))
 E.append(warn("CLEAR THE PLATFORM AFTER EVERY ITEM",
     "Whichever order you use, take the item off the scale and let it return to "
     "<b>0</b> before the next one. The scale only arms itself to send again "
@@ -251,8 +279,9 @@ E.append(bullet("<b>⚖ Settling…</b> — the reading has stopped moving and t
                 "than banking a number that is still creeping up. A weight "
                 "that is still drifting holds here longer — that pause is the "
                 "station protecting the number, not lagging."))
-E.append(bullet("<b>⚖ Total weight at … lb.</b> — the weight is in. Scan the "
-                "PLU, then clear the platform."))
+E.append(bullet("<b>⚖ Total weight at … lb.</b> — the weight is in and held "
+                "on the green strip. Scan the PLU when you're ready, then "
+                "clear the platform."))
 E.append(bullet("<b>⚠ No PLU entered.</b> — you put another item on while the "
                 "last weight was still waiting to be identified. See below."))
 E.append(bullet("<b>⚖ Clear the platform to weigh the next item.</b> — "
@@ -281,8 +310,9 @@ E.append(bullet("<b>⚠ Scale disconnected</b> — the USB cable came loose, or 
 E.append(warn("ONE WEIGHT AT A TIME",
     "Once the scale has taken a weight, the station holds it until you enter "
     "the PLU or press <b>Discard Weight</b> — and it will not weigh anything "
-    "else in the meantime. Put a second item on by mistake and nothing happens: "
-    "no beep, and the strip reads <b>No PLU entered.</b> The weight on screen "
+    "else in the meantime. (Scanning packaged items is fine; weighing a second "
+    "item is not.) Put a second item on by mistake and nothing happens: "
+    "no beep, and the strip reads <b>No PLU entered.</b> The weight held "
     "is still the first item's, so finish that one and it records correctly. "
     "The mistaken item is <b>ignored completely</b> — it will not pop up asking "
     "for a PLU afterwards. To weigh it for real, take it off the scale and put "

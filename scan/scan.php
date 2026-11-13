@@ -168,7 +168,7 @@ renderHead('Scan');
     <div class="banner info" id="scannerHint">
       <span style="font-size:1.2rem;">📷</span>
       <div><strong>Scanner ready</strong> — scan a barcode, or weigh produce
-           first and scan its PLU when asked.</div>
+           first and scan its PLU once the weight is held.</div>
     </div>
 
     <!-- USB scale (HID POS). Hidden entirely on browsers without WebHID, so a
@@ -177,6 +177,36 @@ renderHead('Scan');
     <div id="scaleBar" class="scale-bar" style="display:none;">
       <span id="scaleStatus" class="scale-status"></span>
       <button id="scaleConnect" type="button" class="btn btn-secondary scale-btn">⚖ Connect Scale</button>
+    </div>
+
+    <!-- A weight the scale has captured and is holding for its PLU. A strip on
+         the page rather than a window, so it never takes the keyboard: the
+         scanner goes on typing into the barcode field, other items can be
+         scanned while the weight waits, and the first produce-by-the-pound
+         code scanned (or name picked) is recorded with it. -->
+    <div id="heldWeight" class="held-weight" role="status" style="display:none;">
+      <div class="held-text">
+        <strong>⚖ Weight held: <span id="heldWeightLbs">—</span></strong>
+        <span>Scan its PLU or type its name when ready — other items can be
+              scanned first.</span>
+      </div>
+      <button id="heldEnter" type="button" class="btn btn-secondary scale-btn">⌨ Enter PLU</button>
+      <button id="heldDiscard" type="button" class="btn btn-secondary scale-btn">Discard Weight</button>
+    </div>
+
+    <!-- The other order of the same pair: a by-the-pound item identified before
+         the scale has a weight for it. Same reasoning, same strip — the item
+         waits here for the scale instead of in a window that would catch the
+         next scan in its weight field. Stations with no USB scale connected
+         still get the window, since typing is their only way to give a weight. -->
+    <div id="waitProduce" class="held-weight" role="status" style="display:none;">
+      <div class="held-text">
+        <strong>⚖ <span id="waitProduceName">—</span> — waiting for the scale</strong>
+        <span>It records when its weight settles — other items can be scanned
+              meanwhile.</span>
+      </div>
+      <button id="waitType" type="button" class="btn btn-secondary scale-btn">⌨ Type Weight</button>
+      <button id="waitCancel" type="button" class="btn btn-secondary scale-btn">Cancel Item</button>
     </div>
 
     <!-- Up whenever this page can't hear the scanner: another window or a
@@ -548,6 +578,13 @@ renderHead('Scan');
     .scale-status.warn { border-color: var(--red); color: var(--red);
                          background: #fdf3f3; }
     .scale-btn { padding: 8px 14px; font-size: .9rem; }
+    /* Has to be seen from the scale: it is the only sign a weight is waiting. */
+    .held-weight { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                   margin: 6px 0 4px; padding: 10px 12px; border-radius: 8px;
+                   border: 2px solid var(--green); background: #f4f8e8;
+                   color: var(--brown); }
+    .held-weight .held-text { flex: 1 1 240px; font-size: .9rem; }
+    .held-weight .held-text strong { display: block; font-size: 1.15rem; }
 
     .prep-link { color: var(--brown); font-weight: 600;
                  text-decoration: underline dotted; text-underline-offset: 3px;
@@ -748,6 +785,7 @@ const state = {
   weightDigits:      '',    // adding-machine buffer (manual lb+oz entry)
   weightDecimal:     null,  // decimal-pounds string when in scale/decimal mode
   pendingWeight:     null,  // lbs from the scale, awaiting a PLU (scale-first)
+  heldNewest:        false, // nothing recorded since a weight / waiting item was held
   lastScaleLbs:      null,  // last accepted scale reading, for repeat detection
   lastScaleAt:       0,     // ms timestamp of that reading
   scanner:           null,  // Html5Qrcode instance while the camera is running
@@ -1927,8 +1965,9 @@ barcodeInput.addEventListener('blur', () => {
 //
 //   PLU first  → the "Weight required" window opens and the scale (or the
 //                keypad) fills it in, exactly as it always has.
-//   Scale first→ the reading is held here, the PLU window opens, and both are
-//                recorded together once the operator scans the code.
+//   Scale first→ the reading is held on a strip above the barcode field — no
+//                window, so scanning other items carries on undisturbed — and
+//                is recorded with the first by-the-pound code scanned.
 //
 // Either way the platform then has to be cleared: the scale only re-arms after
 // it returns to zero, so one item can't be sent twice.
@@ -1992,13 +2031,19 @@ async function handleScaleWeight(raw) {
 // weigh the same.
 async function acceptScaleWeight(lbs, opts) {
   const echoCheck = !opts || opts.echoCheck !== false;
-  // The weight window is already open for a scanned item — the reading belongs
-  // to that item, so fill it in rather than starting a second entry.
-  if (state.pendingProduce && $('weightPrompt').style.display !== 'none') {
-    state.weightDigits  = '';
-    state.weightDecimal = String(lbs);
-    renderWeight();
-    await submitWeight();
+  // A scanned item is already waiting for its weight — the reading belongs to
+  // that item, so complete it rather than starting a second entry. Through the
+  // weight window if the operator has opened it, otherwise straight from the
+  // strip the item is waiting on.
+  if (state.pendingProduce) {
+    if ($('weightPrompt').style.display !== 'none') {
+      state.weightDigits  = '';
+      state.weightDecimal = String(lbs);
+      renderWeight();
+      await submitWeight();
+    } else {
+      await recordWaitingProduce(lbs);
+    }
     return;
   }
   if (echoCheck && isScaleEcho(lbs)) {
@@ -2006,17 +2051,103 @@ async function acceptScaleWeight(lbs, opts) {
     return;
   }
   // A weight is already held, waiting for its PLU. Replacing it would beep for
-  // a second item, silently drop the first, and leave the operator typing a
-  // code against a number that had changed behind the window. The held entry
-  // has to be finished or discarded first — this is the last line of defence,
-  // and the scale path refuses earlier so it can explain itself on the strip.
-  if (state.pendingWeight !== null) return;
+  // a second item and silently drop the first. The held entry has to be
+  // finished or discarded first — this is the last line of defence, and the
+  // HID path refuses earlier so it can explain itself on the strip.
+  //
+  // A wedge scale is the exception: it sends when its own key is pressed, so a
+  // second, different reading is the operator re-weighing the item they are
+  // still identifying, and the newer value is the one they mean.
+  if (state.pendingWeight !== null) {
+    if (!echoCheck) return;
+    state.pendingWeight = lbs;
+    state.lastScaleLbs  = lbs;
+    state.lastScaleAt   = Date.now();
+    renderHeldWeight();
+    $('pluWeight').textContent = fmtLbs(lbs);
+    flash('Reading updated — ' + lbs.toFixed(2) + ' lb is the weight that will '
+        + 'be recorded.', 'info');
+    return;
+  }
   // First item of a session can be a weighed one, so open the order here too.
   if (!(await startOrderIfNeeded())) return;
+  // Held, not asked for. Nothing opens and focus stays where it is: the
+  // operator may be halfway through scanning a package, and a window taking the
+  // keyboard at that moment splits the scan between two fields. The weight
+  // waits on the strip until a produce-by-the-pound code arrives (scanItem).
   state.pendingWeight = lbs;
+  state.heldNewest    = true;
   state.lastScaleLbs  = lbs;
   state.lastScaleAt   = Date.now();
-  openPluModal(lbs);
+  renderHeldWeight();
+  // No scale connected over WebHID, so this reading was typed by a keyboard-
+  // wedge scale — sent when the operator pressed its key, with their attention
+  // on this item. Those stations keep the PLU window they have always had. It
+  // sounds the same chirp itself.
+  if (!hid.device) openPluModal(lbs);
+  else alertBeep();
+}
+
+// The strip for an item waiting on the scale, kept in step with
+// state.pendingProduce. Hidden while the weight window is open over the same
+// item, so the two never both ask for it.
+function renderWaitingProduce() {
+  const p = state.pendingProduce;
+  const show = !!p && $('weightPrompt').style.display === 'none';
+  $('waitProduce').style.display = show ? 'flex' : 'none';
+  if (p) $('waitProduceName').textContent = p.generic_name;
+}
+
+function cancelWaitingProduce() {
+  const p = state.pendingProduce;
+  state.pendingProduce = null;
+  state.weightDigits = '';
+  state.weightDecimal = null;
+  closeWeightModal();
+  renderWaitingProduce();
+  if (p) flash(p.generic_name + ' cancelled — it was not recorded.', 'info');
+  refocus();
+}
+
+// The scale has settled with an item waiting on the strip: record the pair.
+// Nothing here touches focus or the barcode field — a scan may be in progress.
+async function recordWaitingProduce(lbs) {
+  const p = state.pendingProduce;
+  // Out of the wait before the save, so a second reading or a second code
+  // arriving mid-save cannot record this item twice.
+  state.pendingProduce = null;
+  renderWaitingProduce();
+  let rec;
+  try {
+    rec = await postJson('../api_scan.php', {
+      action: 'record', barcode: p.barcode, weight_lbs: lbs,
+    });
+  } catch (e) {
+    if (!(e instanceof NetError)) throw e;
+    if (e.notSent) {
+      // Never sent. The item goes back to waiting, but the reading is spent —
+      // the scale will not send it again until the platform has been cleared.
+      if (!state.pendingProduce) { state.pendingProduce = p; renderWaitingProduce(); }
+      flash(p.generic_name + ' was not recorded — no connection. Lift it off '
+          + 'the scale and set it down again once the connection is back.', 'error');
+      return;
+    }
+    noteLostItem(p.barcode, true);   // may or may not have landed
+    return;
+  }
+  afterRecord(rec);
+  if (rec.ok) {
+    flash('Recorded ' + lbs.toFixed(2) + ' lb of ' + p.generic_name
+        + ' — clear the platform for the next item.', 'info');
+  }
+}
+
+// The strip that shows a held weight, kept in step with state.pendingWeight —
+// call it after every change to that.
+function renderHeldWeight() {
+  const held = state.pendingWeight !== null;
+  $('heldWeight').style.display = held ? 'flex' : 'none';
+  if (held) $('heldWeightLbs').textContent = fmtLbs(state.pendingWeight);
 }
 
 // ── USB scale over WebHID (DYMO M25 and other HID POS scales) ─────────────
@@ -2815,8 +2946,12 @@ function pluMessage(msg, kind) {
 function pluError(msg) { pluMessage(msg, 'error'); }
 function pluNote(msg)  { pluMessage(msg, 'note'); }
 
-// `beep` is false when re-opening after a failed save — pluError() sounds the
-// buzz there instead, so a retry never plays both tones at once.
+// With a WebHID scale connected this opens only for the operator, from the
+// held-weight strip's Enter PLU button — never for the scale, whose reading can
+// land at any moment and would take the keyboard from a scan in progress. It is
+// the touch-station route there: a numeric keypad, and a name search limited to
+// produce sold by the pound. A keyboard-wedge scale's reading still opens it
+// directly (acceptScaleWeight). `beep` false opens it without the chirp.
 function openPluModal(lbs, beep) {
   $('pluWeight').textContent = fmtLbs(lbs);
   $('pluInput').value = '';
@@ -2843,7 +2978,18 @@ function closePluModal() {
 function clearPendingWeight() {
   state.pendingWeight = null;
   closePluModal();
+  renderHeldWeight();
 }
+
+function discardHeldWeight() {
+  clearPendingWeight();
+  flash('Weight discarded — clear the platform before weighing again.', 'info');
+  refocus();
+}
+$('heldDiscard').addEventListener('click', discardHeldWeight);
+$('heldEnter').addEventListener('click', () => {
+  if (state.pendingWeight !== null) openPluModal(state.pendingWeight, false);
+});
 
 async function submitPlu() {
   if (state.pendingWeight === null) { closePluModal(); refocus(); return; }
@@ -2864,6 +3010,7 @@ async function submitPlu() {
       state.pendingWeight = again;
       state.lastScaleLbs  = again;
       state.lastScaleAt   = Date.now();
+      renderHeldWeight();
       $('pluWeight').textContent = fmtLbs(again);
       pluNote('Reading updated — this is the weight that will be recorded.');
     }
@@ -2900,11 +3047,7 @@ $('pluInput').addEventListener('keydown', (e) => {
   }
 });
 $('pluSubmit').addEventListener('click', submitPlu);
-$('pluCancel').addEventListener('click', () => {
-  clearPendingWeight();
-  flash('Weight discarded — clear the platform before weighing again.', 'info');
-  refocus();
-});
+$('pluCancel').addEventListener('click', discardHeldWeight);
 // Backdrop click does not dismiss: a held weight is only released by recording
 // an item or by pressing Discard Weight.
 $('pluPrompt').addEventListener('click', (e) => {
@@ -3105,10 +3248,14 @@ async function scanItem(code) {
       openRecallModal(code, lk);
       return;
     }
-    // With a weight held, keep the PLU window up and the weight with it — the
-    // operator only mis-scanned, and re-weighing the item would be busywork.
-    // flash('error') routes into that window while it is open.
-    if (state.pendingWeight !== null) {
+    // With a weight held, a code that is not a packaged UPC was meant as its
+    // PLU: keep the weight — the operator only mis-scanned, and re-weighing the
+    // item would be busywork. An unknown *packaged* UPC is another item scanned
+    // while the weight waits, so it falls through to the usual handling below —
+    // unless the PLU window is open, where flash('error') keeps the message
+    // inside that window rather than stacking a second one on it.
+    if (state.pendingWeight !== null
+        && (lk.kind !== 'packaged' || $('pluPrompt').style.display !== 'none')) {
       flash('Nothing found for ' + code + '. Scan the PLU again, or press '
           + 'Discard Weight to start this item over.', 'error');
       return;
@@ -3155,7 +3302,20 @@ async function scanItem(code) {
     // and the configured tare is not subtracted again.
     if (state.pendingWeight !== null) {
       const w = state.pendingWeight;
-      closePluModal();   // shut first: no second scan can land mid-save
+      // Out of the hold before the save, not after: scanning carries on while
+      // this is in flight, and a second produce code arriving mid-save must not
+      // be recorded against the same weight.
+      state.pendingWeight = null;
+      closePluModal();
+      renderHeldWeight();
+      // Back into the hold when the save did not happen, so that costs a retry
+      // rather than a trip back to the scale — unless the scale has captured
+      // another item meanwhile, which is then the one being held.
+      const restore = () => {
+        if (state.pendingWeight !== null) return;
+        state.pendingWeight = w;
+        renderHeldWeight();
+      };
       let rec;
       try {
         rec = await postJson('../api_scan.php', {
@@ -3165,48 +3325,49 @@ async function scanItem(code) {
         // Unlike a refused save, a lost connection leaves it unknown whether
         // this landed, so the weight is released rather than held for a retry
         // that could record the item twice. handleScan() lists it to check.
-        if (e instanceof NetError && !e.notSent) state.pendingWeight = null;
+        if (!(e instanceof NetError) || e.notSent) restore();
         throw e;
       }
       if (!rec.ok) {
-        // Keep the weight and put the window back, so a failed save costs a
-        // retry rather than a trip back to the scale.
-        openPluModal(w, false);
-        pluError(rec.error || 'Save failed — scan the PLU again to retry.');
+        restore();
+        flash((rec.error || 'Save failed') + ' — the weight is still held; '
+            + 'scan the PLU again to retry.', 'error');
         return;
       }
-      state.pendingWeight = null;
       afterRecord(rec);
       flash('Recorded ' + w.toFixed(2) + ' lb of ' + lk.generic_name
           + ' — clear the platform for the next item.', 'info');
       return;
     }
-    // No weight yet (PLU-first station, or the scale is offline): ask for it.
+    // No weight yet. An item already waiting is replaced: with nothing weighed
+    // in between, a second by-the-pound code is the operator correcting the
+    // first, and one reading cannot be recorded against both.
+    const replaced = state.pendingProduce;
     state.pendingProduce = { barcode: code, generic_name: lk.generic_name };
+    state.heldNewest = true;
     state.weightDigits = '';
     state.weightDecimal = null;
     $('weightItem').textContent = lk.generic_name;
-    openWeightModal();
-    return;
-  }
-  // Packaged or count-based produce: record immediately.
-  if (state.pendingWeight !== null) {
-    // Identified as something sold by the each, not by the pound. Record it the
-    // normal way, but say plainly that the reading was dropped so nobody
-    // assumes the weight went in with it.
-    const dropped = state.pendingWeight;
-    clearPendingWeight();
-    const rec = await postJson('../api_scan.php', {action:'record', barcode: code});
-    afterRecord(rec);
-    if (rec.ok) {
-      // Buzz even though the item saved: a weight was thrown away, and the
-      // operator is watching the scale rather than the banner.
-      errorBeep();
-      flash(lk.generic_name + ' is recorded by count, not weight — the '
-          + dropped.toFixed(2) + ' lb reading was discarded. Clear the platform.', 'warn');
+    // With a USB scale connected and awake, the weight is on its way: wait on
+    // the strip, where scanning other items carries on. Otherwise — a wedge
+    // scale, no scale, or one that has gone to sleep — ask in the window,
+    // because typing may be the only way this station can answer.
+    if (hid.device && !hid.idleWarned) {
+      renderWaitingProduce();
+      alertBeep();
+      if (replaced && replaced.barcode !== code) {
+        flash('Now waiting for the scale: ' + lk.generic_name + ' — '
+            + replaced.generic_name + ' was dropped.', 'info');
+      }
+    } else {
+      openWeightModal();
     }
     return;
   }
+  // Packaged or count-based produce: record immediately. A held weight is left
+  // exactly as it is — this is another item scanned while the produce on the
+  // scale waits for its PLU, and the weight goes on waiting on its strip until
+  // a by-the-pound code arrives or Discard Weight is pressed.
   const rec = await postJson('../api_scan.php', {action:'record', barcode: code});
   afterRecord(rec);
   // Recorded, but under the placeholder name: Ignore Unknown Items is on and
@@ -3520,6 +3681,7 @@ function openWeightModal() {
   m.setAttribute('aria-hidden', 'false');
   weightError('');
   renderWeight();
+  renderWaitingProduce();   // the window has the item now, not the strip
   alertBeep();
   // Defer focus until after the layout settles so iOS Safari accepts it.
   setTimeout(() => $('weightInput').focus(), 0);
@@ -3531,12 +3693,10 @@ function closeWeightModal() {
 }
 
 $('weightSubmit').addEventListener('click', submitWeight);
-$('weightCancel').addEventListener('click', () => {
-  state.pendingProduce = null;
-  state.weightDigits = '';
-  state.weightDecimal = null;
-  closeWeightModal();
-  refocus();
+$('weightCancel').addEventListener('click', cancelWaitingProduce);
+$('waitCancel').addEventListener('click', cancelWaitingProduce);
+$('waitType').addEventListener('click', () => {
+  if (state.pendingProduce) openWeightModal();
 });
 // Block clicks on the dark backdrop from doing anything — operator must
 // explicitly Save or Cancel so the weight prompt cannot be dismissed by
@@ -3605,6 +3765,7 @@ async function submitWeight() {
     state.weightDigits = '';
     state.weightDecimal = null;
     closeWeightModal();
+    renderWaitingProduce();
     noteLostItem(barcode, true);
     return;
   }
@@ -3612,6 +3773,7 @@ async function submitWeight() {
   state.weightDigits = '';
   state.weightDecimal = null;
   closeWeightModal();
+  renderWaitingProduce();
   afterRecord(rec);
   refocus();
 }
@@ -3635,6 +3797,7 @@ function afterRecord(rec) {
   // Not while the camera is running: it beeps on decode (onCamDecode), so
   // beeping again on the record would double every item.
   if (state.role === 'assist' && state.scanBeep && !state.scanner) scanBeep();
+  state.heldNewest = false;   // see removeNewestScan
   const it = rec.item;
   showLast(it.generic_name, it.barcode,
     it.kind === 'produce' ? it.weight_lbs + ' lb' : 'qty ' + it.quantity);
@@ -3713,14 +3876,19 @@ async function removeScan(btn, scanId) {
 // open order.
 async function removeNewestScan() {
   if (!state.orderId) { flash('No open order — nothing to remove.', 'info'); return; }
-  // A held weight is the outstanding action here, not a recorded scan: nothing
-  // has been written yet, so the thing to take back is the weight. Same release
-  // Discard Weight performs, and it leaves the previous item on the order,
-  // which is what the operator standing at the scale means by "undo".
-  if (state.pendingWeight !== null) {
-    clearPendingWeight();
-    flash('Weight discarded — clear the platform before weighing again.', 'info');
-    refocus();
+  // "Undo" takes back the newest thing. A weight held since the last item was
+  // recorded is that thing: nothing has been written for it yet, so it is
+  // released — the same as Discard Weight — and the previous item stays on the
+  // order. Once something has been recorded after the weight was held, the
+  // newest thing is that scan, and the weight goes on waiting.
+  if (state.pendingWeight !== null && state.heldNewest) {
+    discardHeldWeight();
+    return;
+  }
+  // Likewise an item still waiting for the scale: it is the newest thing and
+  // nothing has been written for it.
+  if (state.pendingProduce && state.heldNewest) {
+    cancelWaitingProduce();
     return;
   }
   const row = $('scanTable').querySelector('tbody tr');
@@ -3936,9 +4104,10 @@ async function syncTick() {
   if (net.down || syncBusy) return;
   // Never redraw under an open modal or a request that owns the table.
   if (inFlight > 0 || modalOpen()) return;
-  // Mid-flow client state the operator would lose to a redraw: a held scale
-  // weight, or a produce item waiting on its weight.
-  if (state.pendingWeight !== null || state.pendingProduce) return;
+  // A held scale weight, or an item waiting for the scale, does not stop the
+  // poll: each sits on its own strip, a redraw does not touch it, and it can
+  // wait through many scans, which a team station has to keep seeing. (The
+  // weight window, when open, is covered by modalOpen() above.)
   let d;
   syncBusy = true;
   try {
