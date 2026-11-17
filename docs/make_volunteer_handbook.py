@@ -183,9 +183,9 @@ E.append(body(
 E.append(bullet(
     "<b>With a USB scale:</b> a green strip above the barcode box names the "
     "item and reads <b>waiting for the scale</b>. Set the item on the scale; "
-    "when the reading settles the item records by itself and the strip goes "
-    "away. Nothing pops up, so you can keep scanning other items while you "
-    "wait."))
+    "when the reading settles the item records by itself and the station "
+    "<b>chirps again</b> — lift the item off. Nothing pops up, so keep "
+    "scanning while you wait."))
 E.append(bullet(
     "<b>Without one</b> (an older cable-connected scale, no scale, or a USB "
     "scale that has gone to sleep): a <b>Weight required</b> window pops up. "

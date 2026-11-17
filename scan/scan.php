@@ -2137,6 +2137,13 @@ async function recordWaitingProduce(lbs) {
   }
   afterRecord(rec);
   if (rec.ok) {
+    // The operator is usually scanning something else by now and not looking
+    // here, so say it out loud: the weight is taken and the item can come off
+    // the scale. Same chirp as a weight captured ahead of its PLU. Skipped
+    // where afterRecord() has just played the assist station's per-item beep —
+    // two tones at once would only blur.
+    const assistBeeped = state.role === 'assist' && state.scanBeep && !state.scanner;
+    if (!assistBeeped) alertBeep();
     flash('Recorded ' + lbs.toFixed(2) + ' lb of ' + p.generic_name
         + ' — clear the platform for the next item.', 'info');
   }
