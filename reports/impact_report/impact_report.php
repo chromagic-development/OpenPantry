@@ -599,11 +599,16 @@ $protN = array_slice($protN, 0, 15);
 // of what was scanned. Mac and cheese in all its spellings (and shells and
 // cheese) is counted on the Pasta bar rather than as its own; canned macaroni
 // and macaroni salad are not mac and cheese and keep their own rows.
+//
+// The Unidentified placeholder is left off: it is many different unnamed
+// products under one name, so its bar says nothing about what was handed out
+// (and would top the chart). Its items still count in the totals elsewhere.
 $pkgTenthRe   = '/\braisins\b|\bdried cranberr(?:y|ies)\b/i';   // not Raisin Bran
 $pkgAsPastaRe = '/\b(?:mac|macaroni|shells) (?:and|&) cheese\b/i';
 $pkgGroups = [];
 foreach ($topRows as $r) {
     if ($r['category'] !== 'packaged' || $r['each'] <= 0) continue;
+    if ($r['name'] === UNIDENTIFIED_NAME) continue;
     $g = preg_match($pkgAsPastaRe, $r['name']) ? 'Pasta' : $r['name'];
     if (!isset($pkgGroups[$g])) {
         $pkgGroups[$g] = ['name' => $g, 'count' => 0.0, 'each' => 0, 'est_lbs' => 0.0, 'items' => []];
@@ -2064,7 +2069,8 @@ renderNav('impact');
     <h2>🥫 Top Canned or Packaged Items Distributed</h2>
     <p class="lede" style="margin-bottom:10px;">
       Canned and packaged goods only, ranked by count. Raisins and dried cranberries
-      count at a tenth of the boxes scanned, and mac and cheese is counted as pasta.
+      count at a tenth of the boxes scanned, mac and cheese is counted as pasta, and
+      items still named Unidentified are left out.
     </p>
     <?php if ($topPackaged): ?>
       <div class="chart-wrap" style="height:<?= max(280, count($topPackaged) * 26 + 70) ?>px;"><canvas id="packagedChart"></canvas></div>
