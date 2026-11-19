@@ -9,8 +9,10 @@
 // the login check first. Nothing here writes, uploads, renames or deletes —
 // the documents stay exactly as they were committed.
 //
-// GET documentation.php            → the list (login wall when signed out)
-// GET documentation.php?file=X.pdf → streams that PDF inline for the browser's
+// Served as /openpantry/docs/ via DirectoryIndex in docs/.htaccess.
+//
+// GET docs/            → the list (login wall when signed out)
+// GET docs/?file=X.pdf → streams that PDF inline for the browser's
 //                                    own viewer; 404 for anything that is not
 //                                    a PDF sitting directly in this folder
 $GLOBALS['FS_PREFIX'] = '../';
@@ -111,7 +113,7 @@ renderNav('settings');
           [$title, $desc] = $known[$name] ?? [docsTitleFromName($name), ''];
         ?>
         <li>
-          <a class="doc-title" href="documentation.php?file=<?= rawurlencode($name) ?>"
+          <a class="doc-title" href="./?file=<?= rawurlencode($name) ?>"
              target="_blank" rel="noopener">📄 <?= htmlspecialchars($title) ?></a>
           <span class="doc-desc"><?= htmlspecialchars($desc) ?></span>
           <span class="doc-meta"><?= htmlspecialchars(docsSize((int)filesize($path))) ?>

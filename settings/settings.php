@@ -1078,7 +1078,7 @@ renderNav('settings');
     <a class="btn btn-secondary" href="../monitor.php"
        style="text-decoration:none;"
        title="Open a dashboard that watches the server and both order databases, alerts when they can't be reached, and logs every outage and recovery">📡 Monitor Uptime</a>
-    <a class="btn btn-secondary" href="../docs/documentation.php"
+    <a class="btn btn-secondary" href="../docs/"
        style="text-decoration:none;"
        title="Read the handbooks, quick-setup sheets and printable barcode sheets">📚 Documentation</a>
   </div>
