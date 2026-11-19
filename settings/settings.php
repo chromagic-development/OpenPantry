@@ -1064,7 +1064,8 @@ renderNav('settings');
 
        Monitor Uptime sits beside it: also a page of its own, open to either
        login, and opened in the same tab like Consolidate Names. Its own
-       Settings button brings the operator back here. -->
+       Settings button brings the operator back here. Documentation follows
+       the same pattern: open to either login, PDFs served only through it. -->
   <div style="margin-bottom:20px; display:flex; gap:10px; flex-wrap:wrap;">
     <?php if ($isSupervisor): ?>
       <button type="button" class="btn btn-secondary" disabled
@@ -1077,6 +1078,9 @@ renderNav('settings');
     <a class="btn btn-secondary" href="../monitor.php"
        style="text-decoration:none;"
        title="Open a dashboard that watches the server and both order databases, alerts when they can't be reached, and logs every outage and recovery">📡 Monitor Uptime</a>
+    <a class="btn btn-secondary" href="../docs/documentation.php"
+       style="text-decoration:none;"
+       title="Read the handbooks, quick-setup sheets and printable barcode sheets">📚 Documentation</a>
   </div>
 </div>
 <script>

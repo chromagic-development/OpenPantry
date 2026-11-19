@@ -1,0 +1,12 @@
+# The documents in this folder are for signed-in administrators and supervisors
+# only. Deny every file by URL — the PDFs, the generator scripts, the logo —
+# and allow just documentation.php, which checks the login and then streams the
+# requested PDF itself (docs/documentation.php?file=...).
+#
+# Later <Files> sections override earlier ones, so the allow must come last.
+<FilesMatch ".*">
+  Require all denied
+</FilesMatch>
+<Files "documentation.php">
+  Require all granted
+</Files>
