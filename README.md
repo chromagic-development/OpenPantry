@@ -21,7 +21,8 @@ with picklists, menu counter kiosk based portioning per household size, and
 robust reporting with significant BI granularity for informed planning and
 governance for the board and impact reporting for donors. A smattering of AI
 even maps the many brand names to generic name labeling for management of
-goods. PII security and privacy is paramount. There is even the potential to
+goods and provides recipe suggestions from cart ingredients. 
+PII security and privacy is paramount. There is even the potential to
 track that nutritional needs are being met for orders because the scanning
 API has access to that information.
 
