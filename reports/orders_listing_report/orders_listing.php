@@ -93,20 +93,25 @@ $ordersStmt = $db->prepare(
 $ordersStmt->execute($typeBinds);
 $orders = $ordersStmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Pull all scans for those orders in one shot, then group in PHP.
+// Pull the scans for those orders, then group in PHP. The IDs go in batches:
+// the host's SQLite allows at most 999 bound variables per statement, so a
+// single IN (...) over a month of orders (1000+) failed to prepare and the
+// page returned a 500. Every scan of an order lands in that order's batch,
+// so the per-order scanned_at ordering is unchanged.
 $scansByOrder = [];
 if ($orders) {
-    $ids = array_column($orders, 'id');
-    $placeholders = implode(',', array_fill(0, count($ids), '?'));
-    $sStmt = $db->prepare(
-        "SELECT order_id, generic_name, kind, quantity, weight_lbs, barcode, scanned_at
-         FROM scans WHERE order_id IN ($placeholders)
-         ORDER BY scanned_at ASC"
-    );
-    $sStmt->execute($ids);
-    foreach ($sStmt as $row) {
-        if ($itemFilter !== '' && stripos($row['generic_name'], $itemFilter) === false) continue;
-        $scansByOrder[$row['order_id']][] = $row;
+    foreach (array_chunk(array_column($orders, 'id'), 500) as $ids) {
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $sStmt = $db->prepare(
+            "SELECT order_id, generic_name, kind, quantity, weight_lbs, barcode, scanned_at
+             FROM scans WHERE order_id IN ($placeholders)
+             ORDER BY scanned_at ASC"
+        );
+        $sStmt->execute($ids);
+        foreach ($sStmt as $row) {
+            if ($itemFilter !== '' && stripos($row['generic_name'], $itemFilter) === false) continue;
+            $scansByOrder[$row['order_id']][] = $row;
+        }
     }
 }
 
