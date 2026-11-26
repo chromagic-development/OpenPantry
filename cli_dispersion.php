@@ -66,11 +66,21 @@ foreach ($stmt as $r) {
 // unknowable mix of items, so its dispersion describes nothing.
 unset($hist[UNIDENTIFIED_NAME], $kinds[UNIDENTIFIED_NAME]);
 
+// Same Demand History Start cut op_forecast_item_cached() applies, so the
+// fits here are the report's fits. An item with no scans since the cut stays
+// in $hist with an empty series and is reported as a fallback, as the report
+// still lists it.
+$histFrom = op_history_start();
+foreach ($hist as $n => $d) $hist[$n] = op_trim_history($d, $histFrom);
+
 // Mirror of op_glm_fit_series()'s early-outs, so a null fit can be attributed
 // to a specific gate instead of just "no fit". Pure diagnosis — it computes the
 // same span/bucket/total numbers the real fit does and reports which one bit.
 function op_diag_reason(array $daily, DateTimeImmutable $today, array $unscanned) {
-    if (!$daily) return ['reason' => 'empty series', 'span' => 0, 'buckets' => 0, 'total' => 0.0];
+    if (!$daily) {
+        $why = op_history_start() !== '' ? 'no scans since Demand History Start' : 'empty series';
+        return ['reason' => $why, 'span' => 0, 'buckets' => 0, 'total' => 0.0];
+    }
 
     $earliest = null;
     foreach ($daily as $d => $_) {
@@ -150,6 +160,7 @@ usort($fitted, function ($a, $b) { return $a['phi'] < $b['phi'] ? -1 : ($a['phi'
 
 printf("OpenPantry dispersion probe — %s\n", $today->format('Y-m-d'));
 printf("Lead time %d days, Z = %.2f\n", $leadTime, $z);
+printf("Demand History Start: %s\n", $histFrom !== '' ? $histFrom : '(blank: all history)');
 printf("%d items fitted, %d on trailing-average fallback\n\n",
        count($fitted), count($fellBack));
 

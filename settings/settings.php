@@ -300,10 +300,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             setSetting($k, $spec['int'] ? (string)(int)round($v) : (string)$v);
         }
 
-        $msg = $rejected
-            ? 'Settings saved, except ' . implode(' and ', $rejected)
-              . ' — not a number, left unchanged.'
-            : 'Settings saved.';
+        // Demand History Start: blank clears it (the model learns from all
+        // history); otherwise it must be a real calendar date. A malformed
+        // value is refused rather than stored, since forecast.php would
+        // silently read it as blank and the admin would think it had applied.
+        if (isset($_POST['demand_history_start'])) {
+            $raw = trim((string)$_POST['demand_history_start']);
+            $d = $raw === '' ? null : DateTimeImmutable::createFromFormat('!Y-m-d', $raw);
+            if ($raw === '') {
+                setSetting('demand_history_start', '');
+            } elseif ($d !== false && $d->format('Y-m-d') === $raw) {
+                setSetting('demand_history_start', $raw);
+            } else {
+                $badDate = true;
+            }
+        }
+
+        $msg = 'Settings saved';
+        $why = [];
+        if ($rejected) {
+            $why[] = implode(' and ', $rejected) . ' — not a number';
+        }
+        if (!empty($badDate)) {
+            $why[] = 'Demand History Start — not a valid date';
+        }
+        $msg .= $why ? ', except ' . implode('; ', $why) . ', left unchanged.' : '.';
     }
 }
 
@@ -325,6 +346,7 @@ $lt       = setting('default_lead_time', '14');
 $z        = setting('safety_z', '1.65');
 $vw       = setting('velocity_window', '30');
 $maxCr    = setting('max_storage_crates', '0');
+$histFrom = setting('demand_history_start', '') ?? '';
 $lastErr  = setting('last_openai_error', '');
 $hasCurl  = function_exists('curl_init');
 $tareOz   = setting('tare_oz', '0');
@@ -480,6 +502,10 @@ renderNav('settings');
           <label for="mxc" title="How many cubic feet of storage the pantry can hold. The Order Report adds up the cubic feet an order needs — from each item's Cu Ft/Case on the Inventory page — and warns when the total goes over. 0 turns the check off.">Max Storage (cu ft)</label>
           <input type="number" id="mxc" name="max_storage_crates" min="0" max="100000" value="<?= htmlspecialchars($maxCr) ?>">
         </div>
+        <div>
+          <label for="dhs" title="The first day of scan history the demand model learns growth, today's level and variability from. Leave blank to use all history.">Demand History Start</label>
+          <input type="date" id="dhs" name="demand_history_start" value="<?= htmlspecialchars($histFrom) ?>">
+        </div>
       </div>
       <p style="color:#777; font-size:.8rem; margin-top:8px;">
         Common Z values: 1.28 (90%), 1.65 (95%), 2.33 (99%).
@@ -491,6 +517,14 @@ renderNav('settings');
         <strong>Cu Ft/Case</strong> on the
         <a href="../inventory/">Inventory</a> page. 0 = no limit, and the Order
         Report just reports the total without warning about it.
+      </p>
+      <p style="color:#777; font-size:.8rem; margin-top:4px;">
+        <strong>Demand History Start</strong> is the first day the Order
+        Report's demand model learns from. Set it to the day scanning first
+        covered every visit, so weeks when only some visits were scanned don't
+        look like growing demand. Each item needs 10 full weeks of history after
+        this date before the model fits it; until then the report uses the
+        recent average over the Velocity Window. Blank = use all history.
       </p>
 
       <div style="margin-top:18px;">

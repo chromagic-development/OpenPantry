@@ -299,6 +299,38 @@ function op_project_forecast(array $fit, DateTimeImmutable $today, int $leadTime
     ];
 }
 
+// The earliest scan day the demand model may learn from, as 'Y-m-d', or ''
+// for "all history". Settings → Demand History Start. It exists for a known
+// stretch of incomplete data: while volunteers are still being onboarded to
+// scanning, not every visit gets scanned, and the rising share that does
+// reads to the model as demand growth — it tilts the trend line up, lifts
+// today's level, and adds misses to φ. Fitting only from the date coverage
+// is complete keeps all three honest. Items short of the fit gates after the
+// cut use the trailing-average method, exactly as a new item would.
+//
+// Read once per request. '' when the setting is blank, malformed, or when
+// forecast.php runs standalone (the --selftest) without common.php loaded.
+function op_history_start(): string {
+    static $start = null;
+    if ($start !== null) return $start;
+    $start = '';
+    if (!function_exists('setting')) return $start;
+    $v = trim((string)(setting('demand_history_start', '') ?? ''));
+    $d = DateTimeImmutable::createFromFormat('!Y-m-d', $v);
+    if ($d !== false && $d->format('Y-m-d') === $v) $start = $v;
+    return $start;
+}
+
+// Drop days before $start ('Y-m-d') from a daily-demand map. The fit then
+// treats the item's first scan on or after $start as the start of its
+// history, so the span and bucket gates count only usable weeks.
+function op_trim_history(array $dailyMap, string $start): array {
+    if ($start === '') return $dailyMap;
+    return array_filter($dailyMap, function ($day) use ($start) {
+        return (string)$day >= $start;
+    }, ARRAY_FILTER_USE_KEY);
+}
+
 // Uncached convenience entry point: fit then project. Used by the CLI
 // self-test and any caller that doesn't want the DB cache.
 function op_forecast_item(
@@ -323,6 +355,11 @@ function op_forecast_item_cached(
     PDO $db, string $name, array $dailyMap, DateTimeImmutable $today,
     int $leadTime, float $z, bool $ignoreEvents, array $unscanned = []
 ): ?array {
+    // Trim to the configured history start before hashing, so the series hash
+    // in the key already reflects the cut: changing the date refits every item
+    // whose training series it changes, and leaves the rest cached.
+    $dailyMap = op_trim_history($dailyMap, op_history_start());
+
     // Stable hash of the training series (sort so PDO row order can't matter).
     $series = $dailyMap;
     ksort($series);
