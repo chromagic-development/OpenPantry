@@ -358,7 +358,10 @@ renderNav('report');
       the pantry has never scanned have no demand history to forecast from at
       all; they're listed too, marked
       <span title="never scanned">&empty;</span> with empty model columns, so
-      they can be ordered by hand. Adjust velocity window and Z under
+      they can be ordered by hand. The Lead Time above applies to items
+      without a reorder alert; an item with an alert switched On orders over
+      the alert's own lead time instead (marked <em>LT&nbsp;n</em> after the
+      name). Adjust velocity window and Z under
       <a href="../../settings/">Settings</a>.
     </p>
     <p id="orderMsg" style="font-size:.85rem; font-weight:700; margin-top:8px;"></p>
@@ -369,7 +372,9 @@ renderNav('report');
     <p style="color:#777; font-size:.85rem; margin-bottom:12px;">
       A reminder shows on this page whenever an item's projected days-of-stock
       falls below its alert lead time. Lead time here is the fulfillment window
-      you want to leave for the supplier. Tick <strong>Email</strong> on an alert
+      you want to leave for the supplier, and while the alert is On it is also
+      the lead time the item's order covers, in place of the Lead Time box
+      above. Tick <strong>Email</strong> on an alert
       to also have the reorder reminder emailed to the administrator
       <?php $adminEmail = trim((string)(setting('admin_email', '') ?? '')); ?>
       <?php if ($adminEmail !== ''): ?>
@@ -563,6 +568,12 @@ renderNav('report');
               // GLM-fitted rows get no marker.
               if ($noHist)                    echo '<span title="Never scanned — no demand history to forecast from, so there is no recommendation. Type a quantity to order it." style="color:#999; cursor:help;">&nbsp;&empty;</span>';
               elseif ($r['method'] !== 'glm') echo '<span title="Trailing-average fallback — not enough history to fit the demand model" style="color:#999; cursor:help;">&nbsp;°</span>';
+              // Items with an enabled reorder alert order over that alert's
+              // lead time, not the Lead Time box — say so, or the par reads
+              // as if it ignored the parameter.
+              if (!empty($r['lt_from_alert'])) echo '<span title="Par covers the reorder-alert lead time ('
+                  . (int)$r['lead_time'] . ' days), not the Lead Time box. Turn the alert off to use the box instead." style="color:#8a6d00; font-size:.75rem; white-space:nowrap; cursor:help;">&nbsp;LT&nbsp;'
+                  . (int)$r['lead_time'] . '</span>';
           ?></td>
           <td><?= htmlspecialchars($r['kind']) ?></td>
           <td class="num"><?= $noHist ? '—' : number_format($r['adv'], 2) ?></td>

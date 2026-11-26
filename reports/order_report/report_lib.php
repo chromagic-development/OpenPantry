@@ -295,13 +295,44 @@ function op_report_rows(PDO $db, array $opts = []): array {
     // op_open_dow). Open days in the lead-time horizon are what demand actually
     // varies over; closed ones contribute neither demand nor uncertainty.
     $openDow = op_open_dow($hist);
-    $openInLT = 0;
-    for ($i = 1; $i <= $leadTime; $i++) {
-        if (isset($openDow[(int)$today->modify("+{$i} days")->format('w')])) $openInLT++;
+    // Open days in the next $lt days, memoized per lead time: with per-item
+    // lead times (below) a report holds a handful of distinct values at most.
+    $openInLTMemo = [];
+    $openInLTFor = function (int $lt) use (&$openInLTMemo, $openDow, $today): int {
+        if (!isset($openInLTMemo[$lt])) {
+            $n = 0;
+            for ($i = 1; $i <= $lt; $i++) {
+                if (isset($openDow[(int)$today->modify("+{$i} days")->format('w')])) $n++;
+            }
+            $openInLTMemo[$lt] = $n;
+        }
+        return $openInLTMemo[$lt];
+    };
+
+    // Per-item lead times. An item with an enabled reorder alert orders over
+    // that alert's lead time — the supplier window the operator set for it —
+    // whether or not the alert is currently firing, so its par doesn't jump
+    // the moment the alert trips. Everything else uses the report's Lead Time.
+    // Switching an alert off hands the item back to the report's Lead Time.
+    // MAX in case an item has more than one enabled alert: the longest window
+    // is the one that fires first, so it's the one the order has to cover.
+    op_ensure_alert_email_column($db);
+    $alertLT = [];
+    try {
+        foreach ($db->query("SELECT generic_name, MAX(lead_time_days) lt FROM alerts
+                             WHERE enabled=1 GROUP BY generic_name") as $r) {
+            $lt = (int)$r['lt'];
+            if ($lt >= 1) $alertLT[$r['generic_name']] = $lt;
+        }
+    } catch (\Throwable $e) {
+        $alertLT = []; // no alerts table yet — every item uses the report's
     }
 
     $rows = [];
     foreach ($hist as $name => $days) {
+        $ltFromAlert = isset($alertLT[$name]);
+        $itemLT      = $ltFromAlert ? $alertLT[$name] : $leadTime;
+        $openInLT    = $openInLTFor($itemLT);
         // Trailing window, 0-filled. An unscanned day is left out of the sample
         // entirely so the denominator shrinks with it — a 6-of-7 average rather
         // than a 7-day one diluted by a zero we never actually observed.
@@ -343,14 +374,14 @@ function op_report_rows(PDO $db, array $opts = []): array {
             $varOpen = 0.0;
             foreach ($openVals as $v) $varOpen += ($v - $advOpen) * ($v - $advOpen);
             $sigmaOpen = sqrt($varOpen / $nOpen);
-            $sigma = $sigmaOpen * sqrt($openInLT / $leadTime);
+            $sigma = $sigmaOpen * sqrt($openInLT / $itemLT);
         } else {
             $sigma = 0.0;
         }
 
         $fc = null;
         try {
-            $fc = op_forecast_item_cached($db, $name, $days, $today, $leadTime, $z,
+            $fc = op_forecast_item_cached($db, $name, $days, $today, $itemLT, $z,
                                           $ignoreEvents, $unscanned);
         } catch (\Throwable $e) {
             $fc = null;
@@ -367,8 +398,8 @@ function op_report_rows(PDO $db, array $opts = []): array {
             $method = 'recent';
             $S = 1.0;
             $G = 1.0;
-            $safety = $z * $sigma * sqrt($leadTime);
-            $par    = ($adv * $leadTime) + $safety;
+            $safety = $z * $sigma * sqrt($itemLT);
+            $par    = ($adv * $itemLT) + $safety;
         }
         $stock = (float)($inv[$name]['count'] ?? 0);
         $effStock = $ignoreStock ? 0.0 : $stock;
@@ -397,6 +428,10 @@ function op_report_rows(PDO $db, array $opts = []): array {
             'order'   => $orderReq,
             'purchased' => (float)($inv[$name]['restocked_purchased'] ?? 0),
             'days_left' => $adv > 0 ? ($stock / $adv) : INF,
+            // The lead time this row's par covers, and whether it came from
+            // the item's reorder alert rather than the report's Lead Time.
+            'lead_time'      => $itemLT,
+            'lt_from_alert'  => $ltFromAlert,
         ];
     }
 
@@ -441,6 +476,8 @@ function op_report_rows(PDO $db, array $opts = []): array {
                 'order'   => 0.0,
                 'purchased' => (float)($invRow['restocked_purchased'] ?? 0),
                 'days_left' => INF,
+                'lead_time'     => $leadTime,
+                'lt_from_alert' => false,
             ];
         }
     }
