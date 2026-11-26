@@ -367,25 +367,32 @@ E.append(body(
     "only so that closed-day zeros are not mistaken for demand volatility."))
 E.append(body(
     "The model is gated on how much history each item has. Seasonal richness "
-    "scales with span, so the capability arrives in stages:"))
+    "scales with span, so the capability arrives in stages. History is counted "
+    "from <b>Settings \u2192 Demand History Start</b>, set to 2027-01-01 so "
+    "that the 2026 scanning ramp-up is left out:"))
 E.append(datatable(
     ["Milestone", "Date", "Capability"],
-    [["First fit possible", "2026-09-15",
+    [["First fit possible", "2027-03-12",
       "Intercept + trend only (harmonics = 0)"],
-     ["1 seasonal harmonic", "2027-06-02", "Annual cycle enters the model"],
-     ["2 seasonal harmonics", "2027-12-29", "Sharper seasonal shape"]],
+     ["1 seasonal harmonic", "2027-11-27", "Annual cycle enters the model"],
+     ["2 seasonal harmonics", "2028-06-24", "Sharper seasonal shape"]],
     [1.75, 1.25, 3.55]))
-E.append(info("CURRENT STATUS",
-    "Scan history begins 2026-07-07. Until the first gate clears, every item "
-    "runs the trailing-average fallback and no \u03c6 is computed anywhere \u2014 "
-    "the S and G columns are hardcoded to 1.0. This is the gates working "
-    "correctly on a young dataset, not a fault. The Poisson machinery "
-    "contributes nothing until the model begins projecting levels it has not "
-    "observed, which is when seasonality switches on."))
+E.append(info("CURRENT STATUS (NOVEMBER 2026)",
+    "Scan history begins 2026-08-10. On a 2026-11-20 snapshot the model fit "
+    "665 of 1,520 items, trend only: G is live and S is 1.0. Those trends "
+    "overstate demand. Scanning covered only about half to two-thirds of "
+    "visits until early September, so the model reads the rise in coverage as "
+    "growth, and 220 fits sit at the G = 3 cap. Demand History Start removes "
+    "that ramp. Once the date is set, every item uses the trailing-average "
+    "fallback (no \u03c6 anywhere) until the first fits on 2027-03-12. That is "
+    "the gates working on a young dataset, not a fault."))
 E.append(foot(
     "Gates: span \u2265 60 days and \u2265 10 complete weekly buckets. Harmonics: "
-    "330 days for one, 540 for two. Training window capped at 1100 days. Dates "
-    "derive from the earliest scan on record."))
+    "330 days of span for one, 540 for two. Training window capped at 1100 days. "
+    "Dates count from an item's first scan on or after Demand History Start "
+    "(its first scan on record when the setting is blank), so an item first "
+    "scanned later reaches each stage later. Scans before the start are ignored "
+    "by the model only."))
 
 # Glue each section's kicker + heading + rule to the flowable that follows, so
 # a heading can never strand itself at the foot of a page ahead of its own

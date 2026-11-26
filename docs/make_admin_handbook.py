@@ -59,7 +59,7 @@ E.append(Spacer(1, 0.55 * inch))
 E.append(Paragraph("Setup, configuration, security, reporting, and day-to-day "
                    "operation of OpenPantry.", cover_center))
 E.append(Spacer(1, 0.35 * inch))
-E.append(Paragraph("Revised October 2026 &nbsp;•&nbsp; Version 1.3", cover_center))
+E.append(Paragraph("Revised November 2026 &nbsp;•&nbsp; Version 1.4", cover_center))
 E.append(Paragraph("© 2026 Chromagic Development • Bruce Alexander "
                    "• MIT License", cover_center))
 E.append(PageBreak())
@@ -167,6 +167,15 @@ E.append(bullet("<b>Par-level defaults</b> — default lead time and "
                 "Storage (cu ft)</b>: the report totals the cubic feet an order "
                 "needs (from each item's Cu Ft/Case on the Inventory page) and "
                 "warns when it goes over. 0 turns the check off."))
+# Settings → Demand History Start (settings.php, op_history_start() in
+# forecast.php). Footprints' scanning was still ramping up through 2026, and the
+# model read the rising share of scanned visits as rising demand.
+E.append(bullet("<b>Demand History Start</b> — the first day the Order Now "
+                "demand model learns from: the day scanning first covered every "
+                "visit, so partly scanned weeks don't read as growth. Items "
+                "need 10 full weeks after it to be fitted; until then the "
+                "Velocity Window average is used. Blank = all history. Other "
+                "reports still use every scan."))
 # Settings → Ignore Unknown Items. The volunteer book explains what the station
 # does; this is the decision behind it and where the deferred naming happens.
 E.append(bullet("<b>Ignore Unknown Items</b> — off, a barcode nobody can name "
@@ -467,9 +476,10 @@ E.append(body("For each item: <b>Par Level = Forecast(LeadTime) + "
               "come from a quasi-Poisson model fitted to each item's weekly "
               "scan history, with a time trend and annual seasonality; "
               "dispersion inflates the safety stock so it reflects real "
-              "volatility. Z defaults to 1.65 (~95%). Items with under ~2 "
-              "months of history fall back to a trailing average and are "
-              "marked with a °."))
+              "volatility. Z defaults to 1.65 (~95%). Items with under 10 "
+              "full weeks of history (counted from <b>Demand History "
+              "Start</b> when it is set) fall back to a trailing average and "
+              "are marked with a °."))
 E.append(good("THE FORECAST CACHE IS DISPOSABLE",
     "Fits are memoized in the " + code("forecast_cache") + " table and rebuild "
     "on demand. If a report ever looks stale or wrong, that table is safe to "

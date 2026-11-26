@@ -33,7 +33,7 @@ E += cover(
     subtitle="Volunteer Handbook",
     badge_text="FOR VOLUNTEERS",
     blurb="How to open and run the checkout and Menu Counter stations.",
-    revision="Revised November 2026 &nbsp;•&nbsp; Version 1.5")
+    revision="Revised November 2026 &nbsp;•&nbsp; Version 1.6")
 
 # ================================================================ welcome
 E.append(kicker("START HERE"))
@@ -191,7 +191,10 @@ E.append(bullet(
     "scale that has gone to sleep): a <b>Weight required</b> window pops up. "
     "A cable-connected scale in “PC” mode (see the checklist) fills "
     "the weight in and saves it by itself; otherwise type it by hand. Finish "
-    "this window before you scan anything else."))
+    "this window before you scan anything else. If you scan a barcode into it "
+    "anyway, the window <b>chirps three times</b> and clears the box. Nothing "
+    "is recorded, so stop scanning, then weigh the item or type the weight "
+    "again."))
 E.append(bullet(
     "<b>By hand:</b> type 1 digit for pounds, then 2 digits for ounces. "
     "Example: typing <b>514</b> means <b>5 lb 14 oz</b>. Backspace fixes a "
@@ -332,11 +335,19 @@ E.append(PageBreak())
 E.append(kicker("PACKAGED GOODS"))
 E += h1("When the app doesn't recognize a barcode")
 E.append(body(
-    "Occasionally a packaged item isn't in the catalog. A box appears asking "
-    "you to <b>Identify this item</b>. Type a short, plain generic name (e.g. "
-    "“Canned Tuna”, not the brand) and tap <b>Save &amp; "
-    "Record</b>. The app remembers it for next time. If you're unsure of the "
-    "name, ask the administrator."))
+    "Occasionally a packaged item isn't in the catalog. The station "
+    "<b>buzzes three times</b> and a box appears asking you to <b>Identify "
+    "this item</b>. Type a short, plain generic name (e.g. "
+    "“Canned Tuna”, not the brand) and press <b>Enter</b> or tap "
+    "<b>Save &amp; Record</b>. The app remembers it for next time. If you're "
+    "unsure of the name, ask the administrator."))
+E.append(bullet(
+    "<b>Typed the brand first?</b> Pressing Enter in the brand box moves you to "
+    "the generic-name box, which can't be left empty."))
+E.append(bullet(
+    "<b>Scanned into the box by mistake?</b> The station buzzes three times "
+    "again and removes the barcode number. What you typed stays, and nothing "
+    "is saved. Stop scanning, finish the name, and press Enter."))
 # Settings → Ignore Unknown Items. With it on there is no Identify window at
 # all, which reads as a failed scan to anyone taught to expect one — so say
 # plainly that the quiet version is a success, not a miss.
