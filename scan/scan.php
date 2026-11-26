@@ -824,7 +824,10 @@ const MY_STATION = <?= json_encode($myStation) ?>;
 // Audio so no asset file is needed. Two distinct sounds so the operator can
 // tell them apart without looking at the screen:
 //   alertBeep()  — rising two-tone chirp: produce weight entry.
-//   errorBeep()  — harsh descending buzz: unknown UPC needing a manual name.
+//   errorBeep()  — harsh descending buzz: something the operator must fix.
+//   identifyBeep() — that buzz three times back to back: the Identify window.
+//   weightScanBeep() — the chirp three times: a barcode scanned into the
+//                  Weight required window.
 //   ignoreBeep() — rising swoop: unknown UPC skipped, nothing to do.
 //   alarmBeep()  — repeating two-tone siren: a recalled item was scanned.
 //   readyBeep()  — soft short tick: platform clear, take the next item.
@@ -869,11 +872,49 @@ function playTones(tones, level) {
     }
   } catch (e) { /* audio unavailable — fail silently */ }
 }
+const ALERT_TONES = [[0, 880, 0.18], [0.22, 1175, 0.22]];
 function alertBeep() {
-  playTones([[0, 880, 0.18], [0.22, 1175, 0.22]]);
+  playTones(ALERT_TONES);
 }
+const ERROR_TONES = [[0, 330, 0.16, 'sawtooth'], [0.20, 220, 0.34, 'sawtooth']];
 function errorBeep() {
-  playTones([[0, 330, 0.16, 'sawtooth'], [0.20, 220, 0.34, 'sawtooth']]);
+  playTones(ERROR_TONES);
+}
+// Plays `tones` three times, `period` seconds apart. `guard` is a per-sound
+// { until } holder: a call while that sound's triple is still playing is
+// dropped, so a burst of several scans can't stack one triple on another.
+function tripleTones(tones, period, guard) {
+  const now = Date.now();
+  if (now < guard.until) return;
+  guard.until = now + 3 * period * 1000;
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    for (const [offset, freq, dur, type] of tones) {
+      out.push([i * period + offset, freq, dur, type]);
+    }
+  }
+  playTones(out);
+}
+// errorBeep() three times with a short gap: the Identify this item window is
+// the one buzz that stops the line until someone types a name, and a single
+// buzz was easy to miss at a busy counter. Kept as the same notes, not a new
+// sound, so it still means "unknown item" — just louder in insistence. The
+// rest of the error banners keep the single buzz.
+//
+// It also replays when a barcode is scanned into the window's fields, as the
+// reminder to stop scanning. A burst of several scans would otherwise stack
+// one triple buzz on top of the next, so a call while one is still sounding
+// is dropped: the one already playing says the same thing.
+const identifyGuard = { until: 0 };
+function identifyBeep() {
+  tripleTones(ERROR_TONES, 0.60, identifyGuard);   // one buzz (0.54s) + 0.06s gap
+}
+// alertBeep() three times: a barcode scanned into the Weight required window,
+// the reminder to stop scanning and weigh the item. The window itself still
+// opens with the single alertBeep(); the triple is only for the scan.
+const weightScanGuard = { until: 0 };
+function weightScanBeep() {
+  tripleTones(ALERT_TONES, 0.50, weightScanGuard);  // one chirp (0.44s) + 0.06s gap
 }
 // Falling pair — alertBeep() played backwards. Something came back off the
 // order, which is not an error (nothing went wrong, the operator asked for it)
@@ -926,9 +967,11 @@ function scanBeep() {
   playTones([[0, 1046, 0.12]]);   // ~C6
 }
 // Emergency two-tone siren: a recalled item is on the counter. Six alternating
-// notes over ~1.4s, far longer and more insistent than any other sound here, so
-// it can't be mistaken for the buzz that means "unknown UPC" — that one asks
-// for a name, this one means stop and take the package back. Louder too: the
+// high notes over ~1.4s. The Identify window's triple buzz (identifyBeep) runs
+// about as long, so the two are told apart by pitch and timbre instead: this
+// is a bright siren swinging between E5 and B5, that is a low sawtooth buzz
+// falling to A3. That one asks for a name, this one means stop and take the
+// package back. Louder too: the
 // operator may be several feet from the screen with the modal behind them.
 function alarmBeep() {
   const tones = [];
@@ -3589,7 +3632,7 @@ function openNameModal(barcode, lk) {
   const m = $('namePrompt');
   m.style.display = 'flex';
   m.setAttribute('aria-hidden', 'false');
-  errorBeep();
+  identifyBeep();
   setTimeout(() => $('nameGeneric').focus(), 0);
 }
 function closeNameModal() {
@@ -3638,28 +3681,62 @@ function capitalizeWords(s) {
   });
 });
 
-// Enter never submits on either field, so a stray scanner burst (digits +
-// Enter) can't save a wrong generic name.
+// Enter in either field. The scanner types a barcode's digits into whichever
+// field has focus and ends with Enter, so an operator who keeps scanning while
+// the window is up sends exactly that. Real names never hold four digits in a
+// row ("V8", "Pack Of 12" stop short), while every PLU (4–5 digits) and
+// UPC/store label (8–13) does — so a run of 4+ digits ANYWHERE in the field is
+// a scan. Anywhere, not only at the end: an operator who clicked into the
+// middle of a name to fix a typo and then scanned gets the digits mid-word.
+//
+//   Digits found: play the window's triple buzz again — the reminder to stop
+//     scanning and name the item — and strip only the digits, so a name
+//     already typed around them survives. Never saves.
+//   Otherwise, in Generic Name: save, same as Save & Record (which itself
+//     refuses an empty name and puts the cursor back here).
+//   Otherwise, in Branded Name: the brand is optional and the generic name is
+//     required, so move on to Generic Name — or save if it's already filled.
+function stripScannedDigits(el) {
+  if (!/\d{4,}/.test(el.value)) return false;
+  el.value = el.value.replace(/\d{4,}/g, '').replace(/ {2,}/g, ' ');
+  const end = el.value.length;
+  el.setSelectionRange(end, end);
+  return true;
+}
 ['nameBrand', 'nameGeneric'].forEach((id) => {
   $(id).addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    // Enter here is almost always the tail of a scanner burst: the operator
-    // kept scanning while the modal was up, so the field now holds a UPC (or
-    // several concatenated). Silently swallowing it left that junk in place
-    // to be saved as the generic name. Buzz and empty the field instead, so
-    // the burst leaves no trace and the operator hears that it was rejected.
-    errorBeep();
-    e.target.value = '';
+    if (stripScannedDigits(e.target)) {
+      identifyBeep();
+      return;
+    }
+    if (id === 'nameBrand' && !$('nameGeneric').value.trim()) {
+      $('nameGeneric').focus();
+      return;
+    }
+    $('nameSubmit').click();
   });
 });
+// Set while a save is on its way to the server. Enter makes a second save
+// easy — a held key auto-repeats, a quick double press sends two — and each
+// one would record the item again, so later presses are ignored until the
+// first answers.
+let nameSaving = false;
 $('nameSubmit').addEventListener('click', async () => {
-  if (!state.pendingUnknownUPC) return;
+  if (!state.pendingUnknownUPC || nameSaving) return;
+  // The Enter path strips scanned digits before it gets here; a click on the
+  // button doesn't, so do it for both. A scan that landed in a field and was
+  // never followed by Enter must not be saved as part of the name.
+  const hadGen = stripScannedDigits($('nameGeneric'));
+  const hadBrand = stripScannedDigits($('nameBrand'));
+  if (hadGen || hadBrand) { identifyBeep(); return; }
   const generic = capitalizeWords($('nameGeneric').value.trim());
   if (!generic) { $('nameGeneric').focus(); return; }
   const brand = capitalizeWords($('nameBrand').value.trim());
   const barcode = state.pendingUnknownUPC.barcode;
   let rec;
+  nameSaving = true;
   try {
     rec = await postJson('../api_scan.php', {
       action: 'record',
@@ -3676,6 +3753,8 @@ $('nameSubmit').addEventListener('click', async () => {
     closeNameModal();
     noteLostItem(barcode, true);
     return;
+  } finally {
+    nameSaving = false;
   }
   closeNameModal();
   afterRecord(rec);
@@ -3733,6 +3812,11 @@ async function submitWeight() {
     // Empty buffer OR more than 3 digits → reject and reset so the operator
     // can re-enter. The backend never sees the bad value.
     if (!state.weightDigits || state.weightDigits.length > WEIGHT_VALID_DIGITS) {
+      // 4+ digits then Enter is what a scanner sends — every PLU is 4–5
+      // digits and every UPC 12 — so it is most likely a barcode scanned
+      // while the window waits for a weight: triple chirp, the reminder to
+      // stop scanning and weigh.
+      if (state.weightDigits) weightScanBeep();
       weightError(state.weightDigits ? 'Too many digits — enter 1 lb digit + 2 oz digits (e.g. 514).'
                                      : 'Enter a weight first.');
       state.weightDigits = '';
