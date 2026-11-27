@@ -20,6 +20,10 @@
 // zero-demand days, which would drag the fitted rate — and the par levels
 // built on it — low.
 //
+// Before projecting, the fit's trend is clamped to the G limits and its level
+// anchored to the item's last 4 full weeks (see op_glm_fit_series), so a
+// step-up in an item's history can't be extrapolated into a runaway forecast.
+//
 // From one fit we derive everything the report needs:
 //   * Forecast over the lead time   = Σ_{d=1..LT} λ(today+d)
 //   * Predictive variance over LT    = φ · Forecast        (φ = dispersion)
@@ -50,6 +54,7 @@ const OP_GLM_G_MAX         = 3.0;
 const OP_GLM_S_MIN         = 0.25;   // clamp displayed/applied seasonal factor
 const OP_GLM_S_MAX         = 4.0;
 const OP_GLM_LAMBDA_CAP    = 12.0;   // cap a day's rate at this × deseasonalized base
+const OP_GLM_LEVEL_WEEKS   = 4;      // today's level is anchored to the last N full weeks
 
 // Solve A·x = b for a small dense system by Gaussian elimination with partial
 // pivoting. Returns null if the matrix is effectively singular.
@@ -227,8 +232,44 @@ function op_glm_fit_series(
     $fit = op_glm_fit($X, $y, $offset);
     if (!$fit['ok']) return null;
 
+    // Anchor the projection to what the item is doing now. A log-linear trend
+    // fitted through a step-up — a stray early scan, weeks of nothing, then
+    // steady demand: a new item, a donation, a barcode named partway — cannot
+    // bend, so it lands today's level far above the recent weeks, and its
+    // slope can run to millions ×/yr. Projected raw, that over-forecast
+    // packaged demand 3.5× on the Nov 2026 data (Turkey Gravy: 8,468 for two
+    // weeks against a pace of 155). So, for the projection only:
+    //   1. the trend is clamped to the same G limits the report displays, and
+    //   2. the intercept is shifted so the model, with that clamped trend and
+    //      its seasonal shape, reproduces the item's observed total over the
+    //      last OP_GLM_LEVEL_WEEKS buckets exactly.
+    // Seasonality keeps its fitted shape; only the level and the slope move.
+    // On steady items this changes little (the fit already matches its recent
+    // weeks). In backtests from Oct 27, Nov 9 and Nov 12 it cut the per-item
+    // forecast error on packaged goods from 66–85% to 45–53%.
+    // φ still comes from the full fit, so a step-up item's misfit keeps its
+    // safety stock somewhat padded.
+    //
+    // An item with no demand at all in the anchor weeks projects ~0, as the
+    // trailing-average method would: scans alone can't tell a demand drop from
+    // an empty shelf, so an out-of-stock item's par needs a human eye.
+    $raw  = $fit['beta'];
+    $beta = $raw;
+    $beta[1] = max(log(OP_GLM_G_MIN), min(log(OP_GLM_G_MAX), $beta[1]));
+    $obs = 0.0; $fitted = 0.0;
+    $n = count($X);
+    for ($i = max(0, $n - OP_GLM_LEVEL_WEEKS); $i < $n; $i++) {
+        $eta = $offset[$i];
+        for ($j = 0; $j < count($beta); $j++) $eta += $X[$i][$j] * $beta[$j];
+        if ($eta > 30) $eta = 30; elseif ($eta < -30) $eta = -30;
+        $fitted += exp($eta);
+        $obs    += $y[$i];
+    }
+    $beta[0] += log(max($obs, 1e-9) / max($fitted, 1e-12));
+
     return [
-        'beta'      => $fit['beta'],
+        'beta'      => $beta,
+        'beta_raw'  => $raw,    // the unanchored fit, for diagnostics
         'disp'      => $fit['disp'],
         'harmonics' => $harmonics,
         'buckets'   => count($X),
@@ -370,7 +411,10 @@ function op_forecast_item_cached(
     // the day, which is fine for an operation this rare.
     $u = array_keys($unscanned);
     sort($u);
-    $key = sha1($name . '|' . ($ignoreEvents ? 'E1' : 'E0') . '|'
+    // The 'v2|' prefix: bump it when what a fit stores changes meaning (v2: the
+    // stored beta is anchored to the recent weeks), so same-day cached rows
+    // from older code are not served after a deploy.
+    $key = sha1('v2|' . $name . '|' . ($ignoreEvents ? 'E1' : 'E0') . '|'
               . $today->format('Y-m-d') . '|' . md5(json_encode($series))
               . '|U' . md5(implode(',', $u)));
 
@@ -443,4 +487,19 @@ if (PHP_SAPI === 'cli' && in_array('--selftest', $argv ?? [], true)) {
     printf("avg_daily  : %.3f\n", $r['avg_daily']);
     printf("14d forecast: %.2f  safety %.2f  disp %.3f\n",
            $r['forecast'], $r['safety'], $r['dispersion']);
+
+    // Step-up: one stray scan 15 weeks ago, nothing for 7 weeks, then a steady
+    // 3/day. Truth over the next 14 days is 42; unanchored, the trend through
+    // the step projected several times that. Anchored, 300 draws average ~45
+    // (the capped 3×/yr trend adds ~8%) and a single draw scatters ±30%.
+    $step = [$today->modify('-105 days')->format('Y-m-d') => 1];
+    for ($d = 56; $d >= 1; $d--) {
+        $L = exp(-3.0); $k = 0; $pr = 1.0;
+        do { $k++; $pr *= mt_rand() / mt_getrandmax(); } while ($pr > $L);
+        if ($k - 1 > 0) $step[$today->modify("-{$d} days")->format('Y-m-d')] = $k - 1;
+    }
+    $fit = op_glm_fit_series($step, $today);
+    $r = op_project_forecast($fit, $today, 14, 1.65);
+    printf("step-up    : 14d forecast %.1f (truth 42), raw G %.3g/yr -> applied G %.2f\n",
+           $r['forecast'], exp($fit['beta_raw'][1]), $r['G']);
 }

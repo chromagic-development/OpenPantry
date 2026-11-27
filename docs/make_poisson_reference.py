@@ -366,6 +366,15 @@ E.append(body(
     + code("report_lib.php") + ", whose \u03c3 is measured over distribution days "
     "only so that closed-day zeros are not mistaken for demand volatility."))
 E.append(body(
+    "Before projecting, the fit is anchored. The trend is clamped to the G "
+    "limits (0.33× to 3× a year), and β<sub>0</sub> is shifted "
+    "so the model reproduces the item's observed total over its last 4 full "
+    "weeks; the seasonal shape is kept. A log-linear trend through a step-up "
+    "(a stray early scan, weeks of nothing, then steady demand) otherwise "
+    "lands today's level far above the recent weeks: on November 2026 data the "
+    "unanchored projection ran 3.5× the recent pace for packaged goods. "
+    "φ still comes from the full fit."))
+E.append(body(
     "The model is gated on how much history each item has. Seasonal richness "
     "scales with span, so the capability arrives in stages. History is counted "
     "from <b>Settings \u2192 Demand History Start</b>, set to 2027-01-01 so "
@@ -382,7 +391,8 @@ E.append(info("CURRENT STATUS (NOVEMBER 2026)",
     "665 of 1,520 items, trend only: G is live and S is 1.0. Those trends "
     "overstate demand. Scanning covered only about half to two-thirds of "
     "visits until early September, so the model reads the rise in coverage as "
-    "growth, and 220 fits sit at the G = 3 cap. Demand History Start removes "
+    "growth, and 220 fits sit at the G = 3 cap, which now limits the "
+    "projection as well as the column. Demand History Start removes "
     "that ramp. Once the date is set, every item uses the trailing-average "
     "fallback (no \u03c6 anywhere) until the first fits on 2027-03-12. That is "
     "the gates working on a young dataset, not a fault."))

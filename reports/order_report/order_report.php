@@ -352,7 +352,10 @@ renderNav('report');
     <p style="color:#777; font-size:.8rem; margin-top:10px;">
       Par levels come from a per-item demand model (trend + seasonality) fitted
       to each item's scan history; the S and G columns are its seasonal and
-      annual-growth factors. Items with too little history (&lt; ~2 months) use
+      annual-growth factors. Today's level comes from the item's last 4 full
+      weeks, and growth is held between 0.33× and 3× a year, so an item whose
+      demand only recently picked up isn't projected to keep soaring. Items
+      with too little history (under 10 full weeks) use
       a trailing <?= $velWindow ?>-day average instead (S = G = 1, shown with a
       <span title="trailing-average fallback">°</span> after the name). Items
       the pantry has never scanned have no demand history to forecast from at
@@ -507,7 +510,7 @@ renderNav('report');
         <th class="num" style="text-transform:none" title="Per-day demand standard deviation; drives Safety Stock">σ</th>
         <th class="num" title="Z × √(predictive variance) — buffer for demand uncertainty over the lead time">Safety<br>Stock</th>
         <th class="num" title="Seasonality factor: this window's forecast vs. its deseasonalized baseline (1.0 = average season)">S</th>
-        <th class="num" title="Growth factor: the model's annual demand multiplier, exp(trend) (1.0 = flat)">G</th>
+        <th class="num" title="Growth factor: the model's annual demand multiplier, exp(trend) (1.0 = flat), held between 0.33 and 3">G</th>
         <th class="num">Par<br>Level</th>
         <th class="num">In Stock</th>
         <th class="num" title="How much to order, in the unit the pantry stocks the item in — editable on every row. The forecast fills it in; change it and the order unit, cases and Restock Now all follow. Clear it to leave the item out.">Order<br>Request</th>
